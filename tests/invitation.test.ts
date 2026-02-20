@@ -1,5 +1,5 @@
 /**
- * Comprehensive tests for @tinyland-inc/tinyland-invitation
+ * Comprehensive tests for @tummycrypt/tinyland-invitation
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';

@@ -1,5 +1,5 @@
 /**
- * @tinyland-inc/tinyland-invitation
+ * @tummycrypt/tinyland-invitation
  *
  * Admin invitation management with TOTP setup and audit logging.
  * All external dependencies are injected via configure().
