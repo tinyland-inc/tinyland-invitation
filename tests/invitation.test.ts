@@ -1,6 +1,6 @@
-/**
- * Comprehensive tests for @tummycrypt/tinyland-invitation
- */
+
+
+
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { configure, getConfig, resetConfig } from '../src/config.js';
@@ -12,9 +12,9 @@ import type {
   InvitationCreateOptions,
 } from '../src/index.js';
 
-// ---------------------------------------------------------------------------
-// Mock factories
-// ---------------------------------------------------------------------------
+
+
+
 
 function createMocks() {
   return {
@@ -54,7 +54,7 @@ function buildConfig(mocks: Mocks): InvitationConfig {
   };
 }
 
-/** Helper to build a valid, non-expired invite stored on disk */
+
 function makeInvite(overrides: Partial<AdminInvite> = {}): AdminInvite {
   const future = new Date();
   future.setHours(future.getHours() + 24);
@@ -82,16 +82,16 @@ function makeUsedInvite(overrides: Partial<AdminInvite> = {}): AdminInvite {
   return makeInvite({ usedAt: new Date().toISOString(), usedBy: 'user-1', ...overrides });
 }
 
-/** Standard create options */
+
 const defaultCreateOptions: InvitationCreateOptions = {
   role: 'editor',
   createdBy: 'admin-1',
   createdByHandle: 'admin-handle',
 };
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
+
+
+
 
 describe('tinyland-invitation', () => {
   let mocks: Mocks;
@@ -99,7 +99,7 @@ describe('tinyland-invitation', () => {
   beforeEach(() => {
     resetConfig();
     mocks = createMocks();
-    // Default: invites file does not exist (start fresh)
+    
     mocks.readFile.mockRejectedValue(new Error('not found'));
     configure(buildConfig(mocks));
   });
@@ -108,9 +108,9 @@ describe('tinyland-invitation', () => {
     resetConfig();
   });
 
-  // -----------------------------------------------------------------------
-  // configure / getConfig / resetConfig
-  // -----------------------------------------------------------------------
+  
+  
+  
 
   describe('configure / getConfig / resetConfig', () => {
     it('throws before configure is called', () => {
@@ -141,9 +141,9 @@ describe('tinyland-invitation', () => {
     });
   });
 
-  // -----------------------------------------------------------------------
-  // createInvitation
-  // -----------------------------------------------------------------------
+  
+  
+  
 
   describe('createInvitation', () => {
     it('successfully creates an invitation with default expiry', async () => {
@@ -165,7 +165,7 @@ describe('tinyland-invitation', () => {
       const expiresAt = new Date(result.invitation!.expiresAt);
       const now = new Date();
       const hoursFromNow = (expiresAt.getTime() - now.getTime()) / (1000 * 60 * 60);
-      // Should be approximately 48 hours (default)
+      
       expect(hoursFromNow).toBeGreaterThan(47);
       expect(hoursFromNow).toBeLessThanOrEqual(48.1);
     });
@@ -293,12 +293,12 @@ describe('tinyland-invitation', () => {
         expiresInHours: 0,
       });
 
-      // 0 is falsy with ||, but with ?? it should stay 0; our implementation uses ??
-      // so 0 should be kept as 0
+      
+      
       const expiresAt = new Date(result.invitation!.expiresAt);
       const now = new Date();
       const hoursFromNow = (expiresAt.getTime() - now.getTime()) / (1000 * 60 * 60);
-      // With ?? operator, 0 is respected so expiry should be ~0 hours from now
+      
       expect(hoursFromNow).toBeLessThan(1);
     });
 
@@ -311,9 +311,9 @@ describe('tinyland-invitation', () => {
     });
   });
 
-  // -----------------------------------------------------------------------
-  // getInvitation
-  // -----------------------------------------------------------------------
+  
+  
+  
 
   describe('getInvitation', () => {
     it('returns a valid invitation by token', async () => {
@@ -338,7 +338,7 @@ describe('tinyland-invitation', () => {
       });
 
       const service = new InvitationService();
-      // Note: expired invites get cleaned up during init
+      
       const result = await service.getInvitation('expired-token');
       expect(result).toBeNull();
     });
@@ -351,7 +351,7 @@ describe('tinyland-invitation', () => {
       });
 
       const service = new InvitationService();
-      // Used invites get cleaned up during init
+      
       const result = await service.getInvitation('used-token');
       expect(result).toBeNull();
     });
@@ -377,20 +377,20 @@ describe('tinyland-invitation', () => {
     });
   });
 
-  // -----------------------------------------------------------------------
-  // acceptInvitation
-  // -----------------------------------------------------------------------
+  
+  
+  
 
   describe('acceptInvitation', () => {
     let validToken: string;
 
     beforeEach(async () => {
-      // Create a valid invite in the service
+      
       const service = new InvitationService();
       const created = await service.createInvitation(defaultCreateOptions);
       validToken = created.invitation!.token;
 
-      // Make users file return empty
+      
       mocks.readFile.mockImplementation(async (path: string) => {
         if (path === '/tmp/admin-users.json') return JSON.stringify([]);
         throw new Error('not found');
@@ -398,14 +398,14 @@ describe('tinyland-invitation', () => {
     });
 
     it('successfully accepts a valid invitation', async () => {
-      // Need a fresh service that will load the invite from file
-      // Instead, use the same service that created the invite
+      
+      
       const service = new InvitationService();
-      // Create within this service instance
+      
       const created = await service.createInvitation(defaultCreateOptions);
       const token = created.invitation!.token;
 
-      // Now set up readFile to return empty users
+      
       mocks.readFile.mockImplementation(async (path: string) => {
         if (path === '/tmp/admin-users.json') return JSON.stringify([]);
         throw new Error('not found');
@@ -482,7 +482,7 @@ describe('tinyland-invitation', () => {
 
       await service.acceptInvitation({ token, handle: 'user1', password: 'pass' });
 
-      // The invitation should now be used and not retrievable
+      
       const after = await service.getInvitation(token);
       expect(after).toBeNull();
     });
@@ -638,9 +638,9 @@ describe('tinyland-invitation', () => {
     });
   });
 
-  // -----------------------------------------------------------------------
-  // listPendingInvitations
-  // -----------------------------------------------------------------------
+  
+  
+  
 
   describe('listPendingInvitations', () => {
     it('returns only active, non-expired, non-used invitations', async () => {
@@ -709,9 +709,9 @@ describe('tinyland-invitation', () => {
     });
   });
 
-  // -----------------------------------------------------------------------
-  // revokeInvitation
-  // -----------------------------------------------------------------------
+  
+  
+  
 
   describe('revokeInvitation', () => {
     it('successfully revokes an existing invitation', async () => {
@@ -779,9 +779,9 @@ describe('tinyland-invitation', () => {
     });
   });
 
-  // -----------------------------------------------------------------------
-  // extendInvitation
-  // -----------------------------------------------------------------------
+  
+  
+  
 
   describe('extendInvitation', () => {
     it('extends the expiry of a valid invitation', async () => {
@@ -797,33 +797,33 @@ describe('tinyland-invitation', () => {
       const result = await service.extendInvitation('to-extend', 24);
       expect(result).toBe(true);
 
-      // Verify the invite is still retrievable with updated expiry
+      
       const updated = await service.getInvitation('to-extend');
       expect(updated).not.toBeNull();
       const newExpiry = new Date(updated!.expiresAt).getTime();
       expect(newExpiry).toBeGreaterThan(originalExpiry);
-      // Should be extended by approximately 24 hours
+      
       const diffHours = (newExpiry - originalExpiry) / (1000 * 60 * 60);
       expect(diffHours).toBeCloseTo(24, 0);
     });
 
     it('returns false for a used invitation', async () => {
       const invite = makeUsedInvite({ token: 'used-extend' });
-      // Used invites are cleaned up during init, so we need to add it differently
-      // Actually, the service cleans up used invites on init. So it won't be in the map.
-      // Let's test with a service that already has the invite in its map
+      
+      
+      
       const service = new InvitationService();
       const created = await service.createInvitation(defaultCreateOptions);
       const token = created.invitation!.token;
 
-      // Manually mark as used via accept
+      
       mocks.readFile.mockImplementation(async (path: string) => {
         if (path === '/tmp/admin-users.json') return JSON.stringify([]);
         throw new Error('not found');
       });
       await service.acceptInvitation({ token, handle: 'extenduser', password: 'pass' });
 
-      // Now try to extend
+      
       const result = await service.extendInvitation(token, 24);
       expect(result).toBe(false);
     });
@@ -861,20 +861,20 @@ describe('tinyland-invitation', () => {
     });
   });
 
-  // -----------------------------------------------------------------------
-  // getStatistics
-  // -----------------------------------------------------------------------
+  
+  
+  
 
   describe('getStatistics', () => {
     it('returns correct counts for mixed invitation states', async () => {
       const service = new InvitationService();
 
-      // Create 3 invitations
+      
       await service.createInvitation(defaultCreateOptions);
       await service.createInvitation(defaultCreateOptions);
       const third = await service.createInvitation(defaultCreateOptions);
 
-      // Accept one
+      
       mocks.readFile.mockImplementation(async (path: string) => {
         if (path === '/tmp/admin-users.json') return JSON.stringify([]);
         throw new Error('not found');
@@ -886,7 +886,7 @@ describe('tinyland-invitation', () => {
       });
 
       const stats = await service.getStatistics();
-      // 3 total: 2 pending, 0 expired, 1 used
+      
       expect(stats.total).toBe(3);
       expect(stats.pending).toBe(2);
       expect(stats.expired).toBe(0);
@@ -914,12 +914,12 @@ describe('tinyland-invitation', () => {
       });
 
       const service = new InvitationService();
-      // Note: cleanupExpired removes expired entries during init
+      
       const stats = await service.getStatistics();
-      // After cleanup, only 'valid' remains
+      
       expect(stats.total).toBe(1);
       expect(stats.pending).toBe(1);
-      expect(stats.expired).toBe(0); // cleaned up
+      expect(stats.expired).toBe(0); 
       expect(stats.used).toBe(0);
     });
 
@@ -933,7 +933,7 @@ describe('tinyland-invitation', () => {
         throw new Error('not found');
       });
 
-      // Use a different handle for each
+      
       let handleCounter = 0;
       mocks.generateId.mockImplementation(() => `id-${++handleCounter}`);
 
@@ -953,9 +953,9 @@ describe('tinyland-invitation', () => {
     });
   });
 
-  // -----------------------------------------------------------------------
-  // Lazy initialization
-  // -----------------------------------------------------------------------
+  
+  
+  
 
   describe('lazy initialization', () => {
     it('calls loadInvitations on first operation', async () => {
@@ -1023,9 +1023,9 @@ describe('tinyland-invitation', () => {
     });
   });
 
-  // -----------------------------------------------------------------------
-  // cleanupExpired
-  // -----------------------------------------------------------------------
+  
+  
+  
 
   describe('cleanupExpired', () => {
     it('removes expired invitations on init', async () => {
@@ -1070,7 +1070,7 @@ describe('tinyland-invitation', () => {
 
       const service = new InvitationService();
       mocks.writeFile.mockClear();
-      await service.listPendingInvitations(); // triggers init
+      await service.listPendingInvitations(); 
 
       expect(mocks.writeFile).toHaveBeenCalledWith('/tmp/invites.json', expect.any(String));
     });
@@ -1085,16 +1085,16 @@ describe('tinyland-invitation', () => {
 
       const service = new InvitationService();
       mocks.writeFile.mockClear();
-      await service.listPendingInvitations(); // triggers init
+      await service.listPendingInvitations(); 
 
-      // writeFile should NOT have been called by cleanup (no changes needed)
+      
       expect(mocks.writeFile).not.toHaveBeenCalled();
     });
   });
 
-  // -----------------------------------------------------------------------
-  // File I/O
-  // -----------------------------------------------------------------------
+  
+  
+  
 
   describe('file I/O', () => {
     it('reads invites from the configured path', async () => {
@@ -1168,7 +1168,7 @@ describe('tinyland-invitation', () => {
       const service = new InvitationService();
       const created = await service.createInvitation(defaultCreateOptions);
 
-      // readFile always throws (including for admin-users.json)
+      
       mocks.readFile.mockRejectedValue(new Error('ENOENT'));
 
       const result = await service.acceptInvitation({
@@ -1181,9 +1181,9 @@ describe('tinyland-invitation', () => {
     });
   });
 
-  // -----------------------------------------------------------------------
-  // Edge cases
-  // -----------------------------------------------------------------------
+  
+  
+  
 
   describe('edge cases', () => {
     it('handles empty invitations file', async () => {
@@ -1237,7 +1237,7 @@ describe('tinyland-invitation', () => {
       await service1.createInvitation(defaultCreateOptions);
 
       const service2 = new InvitationService();
-      // service2 starts fresh (readFile throws not found)
+      
       const pending = await service2.listPendingInvitations();
       expect(pending).toEqual([]);
     });
@@ -1275,7 +1275,7 @@ describe('tinyland-invitation', () => {
         handle: 'roundtrip',
       });
 
-      // Verify saved data can be parsed back
+      
       const parsed = JSON.parse(savedData);
       expect(parsed).toHaveLength(1);
       expect(parsed[0].token).toBe(created.invitation!.token);
@@ -1317,30 +1317,30 @@ describe('tinyland-invitation', () => {
         throw new Error('not found');
       });
 
-      // This should fail because JSON.parse will throw, which gets caught
-      // Actually, loadAdminUsers catches errors and returns []
-      // But "not json" will throw in JSON.parse which IS caught by the catch
+      
+      
+      
       const result = await service.acceptInvitation({
         token: created.invitation!.token,
         handle: 'badjson',
         password: 'pass',
       });
 
-      // loadAdminUsers catches parse errors and returns [], so accept should succeed
+      
       expect(result.success).toBe(true);
     });
   });
 
-  // -----------------------------------------------------------------------
-  // Convenience function exports
-  // -----------------------------------------------------------------------
+  
+  
+  
 
   describe('convenience functions', () => {
     it('createInvitation delegates to singleton', async () => {
-      // We can only test this indirectly by importing the functions
-      // and verifying they produce the same behavior
+      
+      
       const { createInvitation } = await import('../src/service.js');
-      // The singleton shares the same config
+      
       const result = await createInvitation(defaultCreateOptions);
       expect(result.success).toBe(true);
     });
@@ -1362,9 +1362,9 @@ describe('tinyland-invitation', () => {
     });
   });
 
-  // -----------------------------------------------------------------------
-  // Config validation
-  // -----------------------------------------------------------------------
+  
+  
+  
 
   describe('config validation', () => {
     it('service methods throw when config is not set', async () => {
@@ -1431,15 +1431,15 @@ describe('tinyland-invitation', () => {
     });
   });
 
-  // -----------------------------------------------------------------------
-  // Full workflow integration
-  // -----------------------------------------------------------------------
+  
+  
+  
 
   describe('full workflow', () => {
     it('create -> get -> accept -> verify used', async () => {
       const service = new InvitationService();
 
-      // Step 1: Create
+      
       const created = await service.createInvitation({
         role: 'moderator',
         createdBy: 'super-admin',
@@ -1449,12 +1449,12 @@ describe('tinyland-invitation', () => {
       expect(created.success).toBe(true);
       const token = created.invitation!.token;
 
-      // Step 2: Get
+      
       const fetched = await service.getInvitation(token);
       expect(fetched).not.toBeNull();
       expect(fetched!.role).toBe('moderator');
 
-      // Step 3: Accept
+      
       mocks.readFile.mockImplementation(async (path: string) => {
         if (path === '/tmp/admin-users.json') return JSON.stringify([]);
         throw new Error('not found');
@@ -1469,7 +1469,7 @@ describe('tinyland-invitation', () => {
       expect(accepted.user!.role).toBe('moderator');
       expect(accepted.needsOnboarding).toBe(true);
 
-      // Step 4: Verify used
+      
       const afterAccept = await service.getInvitation(token);
       expect(afterAccept).toBeNull();
     });
@@ -1480,15 +1480,15 @@ describe('tinyland-invitation', () => {
       const created = await service.createInvitation(defaultCreateOptions);
       const token = created.invitation!.token;
 
-      // Verify exists
+      
       const before = await service.getInvitation(token);
       expect(before).not.toBeNull();
 
-      // Revoke
+      
       const revoked = await service.revokeInvitation(token, 'admin');
       expect(revoked).toBe(true);
 
-      // Verify gone
+      
       const after = await service.getInvitation(token);
       expect(after).toBeNull();
     });
@@ -1500,11 +1500,11 @@ describe('tinyland-invitation', () => {
       const token = created.invitation!.token;
       const originalExpiry = new Date(created.invitation!.expiresAt);
 
-      // Extend
+      
       const extended = await service.extendInvitation(token, 48);
       expect(extended).toBe(true);
 
-      // Verify
+      
       const after = await service.getInvitation(token);
       expect(after).not.toBeNull();
       const newExpiry = new Date(after!.expiresAt);
