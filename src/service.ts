@@ -1,10 +1,10 @@
-/**
- * Streamlined Invitation Service
- * Manages admin user invitations with enhanced security and simplified flow.
- *
- * All external dependencies are injected via the config module.
- * Only Node.js built-in `crypto` is used directly.
- */
+
+
+
+
+
+
+
 
 import crypto from 'crypto';
 import { getConfig } from './config.js';
@@ -23,11 +23,11 @@ export class InvitationService {
   private invitations: Map<string, AdminInvite> = new Map();
   private initialized = false;
 
-  // -------------------------------------------------------------------
-  // Initialization
-  // -------------------------------------------------------------------
+  
+  
+  
 
-  /** Lazy-initialize on first operation */
+  
   private async ensureInitialized(): Promise<void> {
     if (this.initialized) return;
 
@@ -36,14 +36,14 @@ export class InvitationService {
     this.initialized = true;
   }
 
-  /** Load invitations from the configured JSON file */
+  
   private async loadInvitations(): Promise<void> {
     const config = getConfig();
     try {
       const data = await config.readFile(config.invitesFilePath);
       const parsed: unknown = JSON.parse(data);
 
-      // Handle both legacy format {invites: [...]} and modern format [...]
+      
       const invitations: AdminInvite[] = Array.isArray(parsed)
         ? (parsed as AdminInvite[])
         : ((parsed as Record<string, unknown>).invites as AdminInvite[] ?? []);
@@ -53,19 +53,19 @@ export class InvitationService {
         this.invitations.set(invite.token, invite);
       }
     } catch {
-      // File doesn't exist or is empty -- start fresh
+      
       this.invitations = new Map();
     }
   }
 
-  /** Persist the current invitations map to disk */
+  
   private async saveInvitations(): Promise<void> {
     const config = getConfig();
     const invitations = Array.from(this.invitations.values());
     await config.writeFile(config.invitesFilePath, JSON.stringify(invitations, null, 2));
   }
 
-  /** Remove expired and already-used invitations */
+  
   private async cleanupExpired(): Promise<void> {
     const now = new Date();
     let changed = false;
@@ -82,21 +82,21 @@ export class InvitationService {
     }
   }
 
-  // -------------------------------------------------------------------
-  // Public API
-  // -------------------------------------------------------------------
+  
+  
+  
 
-  /**
-   * Create a new invitation.
-   *
-   * Generates a secure token, TOTP secret, QR code, and invite URL.
-   */
+  
+
+
+
+
   async createInvitation(options: InvitationCreateOptions): Promise<InvitationResult> {
     await this.ensureInitialized();
     const config = getConfig();
 
     try {
-      // Validate role permissions
+      
       if (!this.canCreateInviteForRole(options.createdBy, options.role)) {
         return {
           success: false,
@@ -104,19 +104,19 @@ export class InvitationService {
         };
       }
 
-      // Generate secure token
+      
       const token = crypto.randomBytes(32).toString('hex');
       const id = config.generateId();
 
-      // Generate temporary TOTP secret
+      
       const totpSecret = config.generateTotpSecret();
 
-      // Calculate expiration
+      
       const expiresInHours = options.expiresInHours ?? config.authConfig.invitation.defaultExpiryHours;
       const expiresAt = new Date();
       expiresAt.setHours(expiresAt.getHours() + expiresInHours);
 
-      // Build invitation record
+      
       const invitation: AdminInvite = {
         id,
         token,
@@ -129,11 +129,11 @@ export class InvitationService {
         isActive: true,
       };
 
-      // Persist
+      
       this.invitations.set(token, invitation);
       await this.saveInvitations();
 
-      // Generate QR code
+      
       const otpauth = config.generateKeyUri(
         options.handle || `invite-${id}`,
         'Tinyland.dev (Invite)',
@@ -141,10 +141,10 @@ export class InvitationService {
       );
       const qrCode = await config.generateQrCode(otpauth);
 
-      // Build invitation URL
+      
       const inviteUrl = `${config.publicUrl}/admin/accept-invite?token=${token}`;
 
-      // Audit log
+      
       await config.auditLog('INVITATION_CREATED', {
         invitationId: id,
         handle: options.handle,
@@ -168,22 +168,22 @@ export class InvitationService {
     }
   }
 
-  /**
-   * Retrieve an invitation by token.
-   * Returns null when the invitation is expired, used, or nonexistent.
-   */
+  
+
+
+
   async getInvitation(token: string): Promise<AdminInvite | null> {
     await this.ensureInitialized();
 
     const invitation = this.invitations.get(token);
     if (!invitation) return null;
 
-    // Check expiration
+    
     if (new Date(invitation.expiresAt) < new Date()) {
       return null;
     }
 
-    // Check if already used
+    
     if (invitation.usedAt) {
       return null;
     }
@@ -191,16 +191,16 @@ export class InvitationService {
     return invitation;
   }
 
-  /**
-   * Accept an invitation: validate token, create user, mark used.
-   * TOTP setup is deferred to the onboarding flow.
-   */
+  
+
+
+
   async acceptInvitation(data: InvitationAcceptData): Promise<AcceptResult> {
     await this.ensureInitialized();
     const config = getConfig();
 
     try {
-      // Get & validate invitation
+      
       const invitation = await this.getInvitation(data.token);
       if (!invitation) {
         return {
@@ -209,7 +209,7 @@ export class InvitationService {
         };
       }
 
-      // Check handle uniqueness
+      
       const existingUsers = await this.loadAdminUsers();
       if (existingUsers.some((u) => u.handle === data.handle)) {
         return {
@@ -218,13 +218,13 @@ export class InvitationService {
         };
       }
 
-      // Hash password
+      
       const passwordHash = await config.hashPassword(
         data.password,
         config.authConfig.password.bcryptRounds,
       );
 
-      // Create user WITHOUT TOTP enabled (deferred to onboarding)
+      
       const newUser: AdminUser = {
         id: config.generateId(),
         username: data.handle,
@@ -242,19 +242,19 @@ export class InvitationService {
         updatedAt: new Date().toISOString(),
       };
 
-      // Persist user
+      
       existingUsers.push(newUser);
       await config.writeFile(
         config.adminUsersFilePath,
         JSON.stringify(existingUsers, null, 2),
       );
 
-      // Mark invitation as used
+      
       invitation.usedAt = new Date().toISOString();
       invitation.usedBy = newUser.id;
       await this.saveInvitations();
 
-      // Audit logs
+      
       await config.auditLog('INVITATION_ACCEPTED', {
         invitationId: invitation.id,
         userId: newUser.id,
@@ -285,7 +285,7 @@ export class InvitationService {
     }
   }
 
-  /** List all pending (active, non-expired, non-used) invitations */
+  
   async listPendingInvitations(): Promise<AdminInvite[]> {
     await this.ensureInitialized();
 
@@ -295,7 +295,7 @@ export class InvitationService {
     );
   }
 
-  /** Revoke an invitation by token. Returns true on success. */
+  
   async revokeInvitation(token: string, revokedBy: string): Promise<boolean> {
     await this.ensureInitialized();
     const config = getConfig();
@@ -315,7 +315,7 @@ export class InvitationService {
     return true;
   }
 
-  /** Extend the expiration of an invitation. Returns false for used or missing invitations. */
+  
   async extendInvitation(token: string, additionalHours: number): Promise<boolean> {
     await this.ensureInitialized();
 
@@ -330,7 +330,7 @@ export class InvitationService {
     return true;
   }
 
-  /** Get aggregate statistics about invitations */
+  
   async getStatistics(): Promise<InvitationStatistics> {
     await this.ensureInitialized();
 
@@ -345,19 +345,19 @@ export class InvitationService {
     };
   }
 
-  // -------------------------------------------------------------------
-  // Private helpers
-  // -------------------------------------------------------------------
+  
+  
+  
 
-  /**
-   * Check whether a creator is allowed to issue an invite for the given role.
-   * Stub -- returns true. Extend with role-hierarchy logic as needed.
-   */
+  
+
+
+
   private canCreateInviteForRole(_creatorId: string, _targetRole: AdminRole): boolean {
     return true;
   }
 
-  /** Load admin users from the configured JSON file */
+  
   private async loadAdminUsers(): Promise<AdminUser[]> {
     const config = getConfig();
     try {
@@ -369,9 +369,9 @@ export class InvitationService {
   }
 }
 
-// -------------------------------------------------------------------
-// Singleton & convenience exports
-// -------------------------------------------------------------------
+
+
+
 
 export const invitationService = new InvitationService();
 

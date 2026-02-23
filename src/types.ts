@@ -1,11 +1,11 @@
-/**
- * Type definitions for tinyland-invitation
- */
 
-/** Role identifier for admin users */
+
+
+
+
 export type AdminRole = string;
 
-/** Represents a pending or completed invitation */
+
 export interface AdminInvite {
   id: string;
   token: string;
@@ -21,7 +21,7 @@ export interface AdminInvite {
   [key: string]: unknown;
 }
 
-/** Represents an admin user account */
+
 export interface AdminUser {
   id: string;
   username: string;
@@ -40,7 +40,7 @@ export interface AdminUser {
   [key: string]: unknown;
 }
 
-/** Options for creating a new invitation */
+
 export interface InvitationCreateOptions {
   handle?: string;
   role: AdminRole;
@@ -51,14 +51,14 @@ export interface InvitationCreateOptions {
   skipEmail?: boolean;
 }
 
-/** Data required to accept an invitation */
+
 export interface InvitationAcceptData {
   token: string;
   handle: string;
   password: string;
 }
 
-/** Result returned from creating an invitation */
+
 export interface InvitationResult {
   success: boolean;
   invitation?: AdminInvite;
@@ -68,7 +68,7 @@ export interface InvitationResult {
   error?: string;
 }
 
-/** Result returned from accepting an invitation */
+
 export interface AcceptResult {
   success: boolean;
   user?: AdminUser;
@@ -78,7 +78,7 @@ export interface AcceptResult {
   error?: string;
 }
 
-/** Invitation statistics */
+
 export interface InvitationStatistics {
   total: number;
   pending: number;

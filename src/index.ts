@@ -1,9 +1,9 @@
-/**
- * @tummycrypt/tinyland-invitation
- *
- * Admin invitation management with TOTP setup and audit logging.
- * All external dependencies are injected via configure().
- */
+
+
+
+
+
+
 
 export { configure, getConfig, resetConfig } from './config.js';
 export type { InvitationConfig } from './config.js';
