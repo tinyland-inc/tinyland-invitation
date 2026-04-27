@@ -1,6 +1,6 @@
 {
   "name": "@tummycrypt/tinyland-invitation",
-  "version": "0.2.0",
+  "version": "0.2.2",
   "description": "Admin invitation management with TOTP setup and audit logging",
   "type": "module",
   "license": "Zlib AND LicenseRef-Tinyland-Proprietary",
@@ -25,26 +25,31 @@
     "test:watch": "vitest",
     "test:coverage": "vitest --coverage",
     "typecheck": "tsc --noEmit",
-    "prepublishOnly": "npm run build"
+    "prepublishOnly": "pnpm build && pnpm check:package",
+    "check:package": "publint"
   },
   "author": "Tinyland.dev",
   "repository": {
     "type": "git",
-    "url": "https://github.com/tinyland-inc/tinyland.dev",
-    "directory": "packages/tinyland-invitation"
+    "url": "git+https://github.com/tinyland-inc/tinyland-invitation.git"
   },
   "dependencies": {},
   "devDependencies": {
     "@types/node": "^22.0.0",
     "typescript": "^5.0.0",
-    "vitest": "^3.0.0"
+    "vitest": "^4.0.0",
+    "publint": "^0.3.18"
   },
   "engines": {
     "node": ">=22.0.0"
   },
   "publishConfig": {
     "registry": "https://registry.npmjs.org/",
-    "access": "public",
-    "provenance": true
+    "access": "public"
+  },
+  "packageManager": "pnpm@10.13.1",
+  "homepage": "https://github.com/tinyland-inc/tinyland-invitation",
+  "bugs": {
+    "url": "https://github.com/tinyland-inc/tinyland-invitation/issues"
   }
 }

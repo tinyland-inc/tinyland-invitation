@@ -1,0 +1,17 @@
+common --enable_bzlmod
+
+build --jobs=auto
+build --worker_sandboxing
+build --disk_cache=~/.cache/bazel-tinyland-invitation
+build --show_timestamps
+build --@aspect_rules_ts//ts:skipLibCheck=always
+
+test --test_output=errors
+test --test_timeout=120,600,1800,3600
+
+build:ci --color=no
+build:ci --curses=no
+build:ci --noshow_loading_progress
+test:ci --test_output=errors
+
+try-import %workspace%/user.bazelrc
