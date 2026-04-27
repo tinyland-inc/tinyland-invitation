@@ -25,7 +25,7 @@ ts_project(
     ) + ["package.json"],
     declaration = True,
     declaration_map = True,
-    source_map = True,
+    source_map = False,
     tsconfig = ":tsconfig.json",
     transpiler = "tsc",
     out_dir = "dist",
