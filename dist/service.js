@@ -49,7 +49,7 @@ export class InvitationService {
         await this.ensureInitialized();
         const config = getConfig();
         try {
-            if (!this.canCreateInviteForRole(options.createdBy, options.role)) {
+            if (!(await this.canCreateInviteForRole(options.createdBy, options.role, options.createdByRole))) {
                 return {
                     success: false,
                     error: 'Insufficient permissions to create invitation for this role',
@@ -222,8 +222,21 @@ export class InvitationService {
             used: all.filter((i) => !!i.usedAt).length,
         };
     }
-    canCreateInviteForRole(_creatorId, _targetRole) {
-        return true;
+    // Role policy is injected via config.canCreateInviteForRole (see config.ts).
+    // TODO(TIN-2526): when no hook is configured this is permissive (returns true)
+    // to stay drop-in compatible with existing consumers. Whether the unconfigured
+    // default should flip to fail-closed is an open operator decision — to flip,
+    // change the `return true` below to `return false`.
+    async canCreateInviteForRole(creatorId, targetRole, creatorRole) {
+        const config = getConfig();
+        if (!config.canCreateInviteForRole) {
+            return true;
+        }
+        return config.canCreateInviteForRole({
+            createdBy: creatorId,
+            createdByRole: creatorRole,
+            targetRole,
+        });
     }
     async loadAdminUsers() {
         const config = getConfig();

@@ -3,6 +3,9 @@
 
 
 
+// Intentionally widened to string for now (TIN-2526): role vocabularies are
+// consumer-defined and enforced by the injected canCreateInviteForRole hook,
+// so tightening this to a union here would break existing public API users.
 export type AdminRole = string;
 
 
@@ -45,6 +48,7 @@ export interface InvitationCreateOptions {
   handle?: string;
   role: AdminRole;
   createdBy: string;
+  createdByRole?: AdminRole;
   createdByHandle: string;
   expiresInHours?: number;
   message?: string;
