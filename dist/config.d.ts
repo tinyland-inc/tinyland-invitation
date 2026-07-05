@@ -18,6 +18,11 @@ export interface InvitationConfig {
     };
     auditLog: (eventType: string, data: Record<string, unknown>) => Promise<void>;
     publicUrl: string;
+    canCreateInviteForRole?: (args: {
+        createdBy: string;
+        createdByRole?: string;
+        targetRole: string;
+    }) => boolean | Promise<boolean>;
 }
 export declare function configure(config: InvitationConfig): void;
 export declare function getConfig(): InvitationConfig;

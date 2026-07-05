@@ -34,6 +34,7 @@ export interface InvitationCreateOptions {
     handle?: string;
     role: AdminRole;
     createdBy: string;
+    createdByRole?: AdminRole;
     createdByHandle: string;
     expiresInHours?: number;
     message?: string;

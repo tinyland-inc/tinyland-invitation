@@ -146,6 +146,63 @@ describe('tinyland-invitation', () => {
   
 
   describe('createInvitation', () => {
+    it('delegates role policy to configured canCreateInviteForRole hook', async () => {
+      const config = buildConfig(mocks);
+      const canCreateInviteForRole = vi.fn(() => false);
+      configure({ ...config, canCreateInviteForRole });
+
+      const service = new InvitationService();
+      const result = await service.createInvitation({
+        ...defaultCreateOptions,
+        createdByRole: 'editor',
+        role: 'admin',
+      });
+
+      expect(result).toEqual({
+        success: false,
+        error: 'Insufficient permissions to create invitation for this role',
+      });
+      expect(canCreateInviteForRole).toHaveBeenCalledWith({
+        createdBy: 'admin-1',
+        createdByRole: 'editor',
+        targetRole: 'admin',
+      });
+      expect(mocks.writeFile).not.toHaveBeenCalled();
+    });
+
+    it('creates the invitation when the hook allows, including async hooks', async () => {
+      const config = buildConfig(mocks);
+      const canCreateInviteForRole = vi.fn(async () => true);
+      configure({ ...config, canCreateInviteForRole });
+
+      const service = new InvitationService();
+      const result = await service.createInvitation({
+        ...defaultCreateOptions,
+        createdByRole: 'owner',
+      });
+
+      expect(result.success).toBe(true);
+      expect(canCreateInviteForRole).toHaveBeenCalledWith({
+        createdBy: 'admin-1',
+        createdByRole: 'owner',
+        targetRole: 'editor',
+      });
+    });
+
+    it('is permissive when no canCreateInviteForRole hook is configured', async () => {
+      // TODO(TIN-2526): permissive-when-unconfigured is the current contract;
+      // flipping to fail-closed is an open operator decision.
+      const service = new InvitationService();
+      const result = await service.createInvitation({
+        ...defaultCreateOptions,
+        createdByRole: 'editor',
+        role: 'admin',
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.invitation!.role).toBe('admin');
+    });
+
     it('successfully creates an invitation with default expiry', async () => {
       const service = new InvitationService();
       const result = await service.createInvitation(defaultCreateOptions);
