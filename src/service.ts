@@ -8,6 +8,8 @@
 
 import crypto from 'crypto';
 import { getConfig } from './config.js';
+import { InvitationError } from './errors.js';
+import { defaultCanCreateInviteForRole } from './roles.js';
 import type {
   AdminInvite,
   AdminUser,
@@ -95,22 +97,25 @@ export class InvitationService {
     await this.ensureInitialized();
     const config = getConfig();
 
-    try {
-      
-      if (
-        !(await this.canCreateInviteForRole(
-          options.createdBy,
-          options.role,
-          options.createdByRole,
-        ))
-      ) {
-        return {
-          success: false,
-          error: 'Insufficient permissions to create invitation for this role',
-        };
-      }
+    // Fail-closed authority gate (TIN-1607 R3). Throws InvitationError('forbidden')
+    // when the creator does not strictly outrank the target role. Deliberately
+    // OUTSIDE the try/catch so a denial can never be masked as a generic failure,
+    // and a mis-wired consumer cannot silently mint an unrestricted invitation.
+    if (
+      !(await this.canCreateInviteForRole(
+        options.createdBy,
+        options.role,
+        options.createdByRole,
+      ))
+    ) {
+      throw new InvitationError(
+        'Insufficient permissions to create invitation for this role',
+        'forbidden',
+      );
+    }
 
-      
+    try {
+
       const token = crypto.randomBytes(32).toString('hex');
       const id = config.generateId();
 
@@ -359,23 +364,21 @@ export class InvitationService {
 
 
 
-  // Role policy is injected via config.canCreateInviteForRole (see config.ts).
-  // TODO(TIN-2526): when no hook is configured this is permissive (returns true)
-  // to stay drop-in compatible with existing consumers. Whether the unconfigured
-  // default should flip to fail-closed is an open operator decision — to flip,
-  // change the `return true` below to `return false`.
+  // Role authority gate (TIN-1607 R3). A consumer MAY inject a bespoke policy via
+  // config.canCreateInviteForRole (see config.ts); when none is supplied we fall
+  // back to the real role-hierarchy check (defaultCanCreateInviteForRole), which
+  // requires the creator to STRICTLY outrank the target. The default is never
+  // permissive — an unwired consumer fails closed rather than minting
+  // unrestricted invitations.
   private async canCreateInviteForRole(
     creatorId: string,
     targetRole: AdminRole,
     creatorRole?: AdminRole,
   ): Promise<boolean> {
     const config = getConfig();
+    const gate = config.canCreateInviteForRole ?? defaultCanCreateInviteForRole;
 
-    if (!config.canCreateInviteForRole) {
-      return true;
-    }
-
-    return config.canCreateInviteForRole({
+    return gate({
       createdBy: creatorId,
       createdByRole: creatorRole,
       targetRole,

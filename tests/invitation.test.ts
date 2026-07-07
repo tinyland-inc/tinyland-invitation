@@ -5,6 +5,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { configure, getConfig, resetConfig } from '../src/config.js';
 import { InvitationService } from '../src/service.js';
+import { InvitationError } from '../src/index.js';
 import type {
   InvitationConfig,
   AdminInvite,
@@ -83,9 +84,12 @@ function makeUsedInvite(overrides: Partial<AdminInvite> = {}): AdminInvite {
 }
 
 
+// createdByRole is super_admin so the default role-hierarchy gate (TIN-1607 R3)
+// permits these fixture invites (super_admin strictly outranks editor).
 const defaultCreateOptions: InvitationCreateOptions = {
   role: 'editor',
   createdBy: 'admin-1',
+  createdByRole: 'super_admin',
   createdByHandle: 'admin-handle',
 };
 
@@ -146,22 +150,20 @@ describe('tinyland-invitation', () => {
   
 
   describe('createInvitation', () => {
-    it('delegates role policy to configured canCreateInviteForRole hook', async () => {
+    it('throws InvitationError when the configured canCreateInviteForRole hook denies', async () => {
       const config = buildConfig(mocks);
       const canCreateInviteForRole = vi.fn(() => false);
       configure({ ...config, canCreateInviteForRole });
 
       const service = new InvitationService();
-      const result = await service.createInvitation({
-        ...defaultCreateOptions,
-        createdByRole: 'editor',
-        role: 'admin',
-      });
+      await expect(
+        service.createInvitation({
+          ...defaultCreateOptions,
+          createdByRole: 'editor',
+          role: 'admin',
+        }),
+      ).rejects.toThrow('Insufficient permissions to create invitation for this role');
 
-      expect(result).toEqual({
-        success: false,
-        error: 'Insufficient permissions to create invitation for this role',
-      });
       expect(canCreateInviteForRole).toHaveBeenCalledWith({
         createdBy: 'admin-1',
         createdByRole: 'editor',
@@ -189,18 +191,31 @@ describe('tinyland-invitation', () => {
       });
     });
 
-    it('is permissive when no canCreateInviteForRole hook is configured', async () => {
-      // TODO(TIN-2526): permissive-when-unconfigured is the current contract;
-      // flipping to fail-closed is an open operator decision.
+    it('applies the real role-hierarchy gate when no hook is configured (fail closed)', async () => {
+      // TIN-1607 R3: the unconfigured default is the real hierarchy check, not
+      // permissive. editor does NOT strictly outrank admin, so this is denied.
+      const service = new InvitationService();
+      await expect(
+        service.createInvitation({
+          ...defaultCreateOptions,
+          createdByRole: 'editor',
+          role: 'admin',
+        }),
+      ).rejects.toBeInstanceOf(InvitationError);
+
+      expect(mocks.writeFile).not.toHaveBeenCalled();
+    });
+
+    it('allows creation via the default gate when the creator strictly outranks the target', async () => {
       const service = new InvitationService();
       const result = await service.createInvitation({
         ...defaultCreateOptions,
-        createdByRole: 'editor',
-        role: 'admin',
+        createdByRole: 'admin',
+        role: 'editor',
       });
 
       expect(result.success).toBe(true);
-      expect(result.invitation!.role).toBe('admin');
+      expect(result.invitation!.role).toBe('editor');
     });
 
     it('successfully creates an invitation with default expiry', async () => {
@@ -368,9 +383,140 @@ describe('tinyland-invitation', () => {
     });
   });
 
-  
-  
-  
+  //
+  // Role-authority gate (TIN-1607 R3)
+  //
+
+  describe('role-authority gate (TIN-1607)', () => {
+    it('default gate: creator strictly outranking target is allowed', async () => {
+      const service = new InvitationService();
+      const result = await service.createInvitation({
+        role: 'editor',
+        createdBy: 'boss',
+        createdByRole: 'super_admin',
+        createdByHandle: 'boss',
+      });
+      expect(result.success).toBe(true);
+      expect(result.invitation!.role).toBe('editor');
+    });
+
+    it('default gate: equal rank is denied (strict outranking required)', async () => {
+      const service = new InvitationService();
+      await expect(
+        service.createInvitation({
+          role: 'admin',
+          createdBy: 'peer',
+          createdByRole: 'admin',
+          createdByHandle: 'peer',
+        }),
+      ).rejects.toBeInstanceOf(InvitationError);
+      expect(mocks.writeFile).not.toHaveBeenCalled();
+    });
+
+    it('default gate: lower rank creating a higher role is denied', async () => {
+      const service = new InvitationService();
+      await expect(
+        service.createInvitation({
+          role: 'super_admin',
+          createdBy: 'mod',
+          createdByRole: 'moderator',
+          createdByHandle: 'mod',
+        }),
+      ).rejects.toThrow(InvitationError);
+    });
+
+    it('default gate: missing createdByRole is denied (fail closed)', async () => {
+      const service = new InvitationService();
+      await expect(
+        service.createInvitation({
+          role: 'viewer',
+          createdBy: 'nobody',
+          createdByHandle: 'nobody',
+        }),
+      ).rejects.toBeInstanceOf(InvitationError);
+    });
+
+    it('default gate: unknown role vocabulary is denied (fail closed)', async () => {
+      const service = new InvitationService();
+      await expect(
+        service.createInvitation({
+          role: 'editor',
+          createdBy: 'x',
+          createdByRole: 'wizard',
+          createdByHandle: 'x',
+        }),
+      ).rejects.toBeInstanceOf(InvitationError);
+    });
+
+    it('default gate is never blindly permissive: a viewer cannot mint an admin invite', async () => {
+      const service = new InvitationService();
+      await expect(
+        service.createInvitation({
+          role: 'admin',
+          createdBy: 'v',
+          createdByRole: 'viewer',
+          createdByHandle: 'v',
+        }),
+      ).rejects.toBeInstanceOf(InvitationError);
+      expect(mocks.writeFile).not.toHaveBeenCalled();
+    });
+
+    it('config override is respected: an allowing hook bypasses the default denial', async () => {
+      const config = buildConfig(mocks);
+      // Default gate would DENY (viewer cannot invite admin); the hook allows it.
+      const canCreateInviteForRole = vi.fn(() => true);
+      configure({ ...config, canCreateInviteForRole });
+
+      const service = new InvitationService();
+      const result = await service.createInvitation({
+        role: 'admin',
+        createdBy: 'v',
+        createdByRole: 'viewer',
+        createdByHandle: 'v',
+      });
+
+      expect(result.success).toBe(true);
+      expect(canCreateInviteForRole).toHaveBeenCalledWith({
+        createdBy: 'v',
+        createdByRole: 'viewer',
+        targetRole: 'admin',
+      });
+    });
+
+    it('config override is respected: a denying hook blocks an otherwise-allowed default', async () => {
+      const config = buildConfig(mocks);
+      // Default gate would ALLOW (super_admin outranks editor); the hook denies.
+      const canCreateInviteForRole = vi.fn(() => false);
+      configure({ ...config, canCreateInviteForRole });
+
+      const service = new InvitationService();
+      await expect(
+        service.createInvitation({
+          role: 'editor',
+          createdBy: 'boss',
+          createdByRole: 'super_admin',
+          createdByHandle: 'boss',
+        }),
+      ).rejects.toBeInstanceOf(InvitationError);
+      expect(mocks.writeFile).not.toHaveBeenCalled();
+    });
+
+    it('thrown InvitationError carries the forbidden code', async () => {
+      const service = new InvitationService();
+      await expect(
+        service.createInvitation({
+          role: 'admin',
+          createdBy: 'v',
+          createdByRole: 'viewer',
+          createdByHandle: 'v',
+        }),
+      ).rejects.toMatchObject({ name: 'InvitationError', code: 'forbidden' });
+    });
+  });
+
+
+
+
 
   describe('getInvitation', () => {
     it('returns a valid invitation by token', async () => {
@@ -1344,6 +1490,7 @@ describe('tinyland-invitation', () => {
       const result = await service.createInvitation({
         role: 'admin',
         createdBy: 'creator-id',
+        createdByRole: 'super_admin',
         createdByHandle: '',
       });
 
@@ -1500,6 +1647,7 @@ describe('tinyland-invitation', () => {
       const created = await service.createInvitation({
         role: 'moderator',
         createdBy: 'super-admin',
+        createdByRole: 'super_admin',
         createdByHandle: 'SuperAdmin',
         handle: 'newmod',
       });
