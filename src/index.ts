@@ -16,6 +16,11 @@ export {
   getInvitation,
 } from './service.js';
 
+export { InvitationError } from './errors.js';
+export type { InvitationErrorCode } from './errors.js';
+
+export { defaultCanCreateInviteForRole, ROLE_HIERARCHY } from './roles.js';
+
 export type {
   AdminRole,
   AdminInvite,
