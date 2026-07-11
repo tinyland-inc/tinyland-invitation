@@ -21,6 +21,35 @@ import type {
   InvitationStatistics,
 } from './types.js';
 
+const acceptanceLocks = new Map<string, Promise<void>>();
+const failedAcceptanceClaims = new Set<string>();
+
+// This serializes a token across every InvitationService instance in one Node
+// process. It is deliberately not presented as cross-process or cross-replica
+// compare-and-set; consumers that share storage across replicas still need a
+// storage-backed CAS before they can claim distributed exactly-once semantics.
+async function withAcceptanceLock<T>(key: string, operation: () => Promise<T>): Promise<T> {
+  let release!: () => void;
+  const current = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const previous = acceptanceLocks.get(key);
+
+  acceptanceLocks.set(key, current);
+  if (previous) {
+    await previous;
+  }
+
+  try {
+    return await operation();
+  } finally {
+    release();
+    if (acceptanceLocks.get(key) === current) {
+      acceptanceLocks.delete(key);
+    }
+  }
+}
+
 export class InvitationService {
   private invitations: Map<string, AdminInvite> = new Map();
   private initialized = false;
@@ -186,6 +215,10 @@ export class InvitationService {
   async getInvitation(token: string): Promise<AdminInvite | null> {
     await this.ensureInitialized();
 
+    return this.getPendingInvitation(token);
+  }
+
+  private getPendingInvitation(token: string): AdminInvite | null {
     const invitation = this.invitations.get(token);
     if (!invitation) return null;
 
@@ -207,93 +240,109 @@ export class InvitationService {
 
 
   async acceptInvitation(data: InvitationAcceptData): Promise<AcceptResult> {
-    await this.ensureInitialized();
     const config = getConfig();
+    const lockKey = `${config.invitesFilePath}\0${data.token}`;
 
-    try {
-      
-      const invitation = await this.getInvitation(data.token);
-      if (!invitation) {
+    return withAcceptanceLock(lockKey, async () => {
+      await this.ensureInitialized();
+
+      try {
+        // Re-read the whole-file authority after entering the token lock. This
+        // closes stale reads from route guards and other service instances in
+        // this process. A read or parse failure empties the map and therefore
+        // denies acceptance rather than trusting stale in-memory state.
+        await this.loadInvitations();
+
+        const invitation = failedAcceptanceClaims.has(lockKey)
+          ? null
+          : this.getPendingInvitation(data.token);
+        if (!invitation) {
+          return {
+            success: false,
+            error: 'Invalid or expired invitation',
+          };
+        }
+
+        const existingUsers = await this.loadAdminUsers();
+        if (existingUsers.some((u) => u.handle === data.handle)) {
+          return {
+            success: false,
+            error: 'Handle already taken',
+          };
+        }
+
+        const userId = config.generateId();
+
+        // Claim first. Once validation succeeds, any later hash, user-file, or
+        // audit failure leaves the token consumed instead of reopening a
+        // role-bearing capability. If persistence itself fails, retain a
+        // process-local deny marker for the remainder of this process.
+        invitation.usedAt = new Date().toISOString();
+        invitation.usedBy = userId;
+        try {
+          await this.saveInvitations();
+        } catch (error) {
+          failedAcceptanceClaims.add(lockKey);
+          throw error;
+        }
+
+        const passwordHash = await config.hashPassword(
+          data.password,
+          config.authConfig.password.bcryptRounds,
+        );
+
+        const newUser: AdminUser = {
+          id: userId,
+          username: data.handle,
+          handle: data.handle,
+          email: '',
+          passwordHash,
+          role: invitation.role,
+          totpEnabled: false,
+          totpSecretId: undefined,
+          isActive: true,
+          needsOnboarding: true,
+          onboardingStep: 0,
+          firstLogin: true,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        };
+
+        existingUsers.push(newUser);
+        await config.writeFile(
+          config.adminUsersFilePath,
+          JSON.stringify(existingUsers, null, 2),
+        );
+
+        await config.auditLog('INVITATION_ACCEPTED', {
+          invitationId: invitation.id,
+          userId: newUser.id,
+          handle: data.handle,
+          role: invitation.role,
+        });
+
+        await config.auditLog('USER_CREATED', {
+          userId: newUser.id,
+          handle: data.handle,
+          role: invitation.role,
+          createdVia: 'invitation',
+        });
+
+        return {
+          success: true,
+          user: newUser,
+          userId: newUser.id,
+          needsOnboarding: true,
+          tempTotpSecret: invitation.temporaryTotpSecret,
+        };
+      } catch (error) {
+        console.error('Failed to accept invitation:', error);
         return {
           success: false,
-          error: 'Invalid or expired invitation',
+          error: 'Failed to accept invitation',
         };
       }
-
-      
-      const existingUsers = await this.loadAdminUsers();
-      if (existingUsers.some((u) => u.handle === data.handle)) {
-        return {
-          success: false,
-          error: 'Handle already taken',
-        };
-      }
-
-      
-      const passwordHash = await config.hashPassword(
-        data.password,
-        config.authConfig.password.bcryptRounds,
-      );
-
-      
-      const newUser: AdminUser = {
-        id: config.generateId(),
-        username: data.handle,
-        handle: data.handle,
-        email: '',
-        passwordHash,
-        role: invitation.role,
-        totpEnabled: false,
-        totpSecretId: undefined,
-        isActive: true,
-        needsOnboarding: true,
-        onboardingStep: 0,
-        firstLogin: true,
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-      };
-
-      
-      existingUsers.push(newUser);
-      await config.writeFile(
-        config.adminUsersFilePath,
-        JSON.stringify(existingUsers, null, 2),
-      );
-
-      
-      invitation.usedAt = new Date().toISOString();
-      invitation.usedBy = newUser.id;
-      await this.saveInvitations();
-
-      
-      await config.auditLog('INVITATION_ACCEPTED', {
-        invitationId: invitation.id,
-        userId: newUser.id,
-        handle: data.handle,
-        role: invitation.role,
-      });
-
-      await config.auditLog('USER_CREATED', {
-        userId: newUser.id,
-        handle: data.handle,
-        role: invitation.role,
-        createdVia: 'invitation',
-      });
-
-      return {
-        success: true,
-        user: newUser,
-        userId: newUser.id,
-        needsOnboarding: true,
-        tempTotpSecret: invitation.temporaryTotpSecret,
-      };
-    } catch (error) {
-      console.error('Failed to accept invitation:', error);
-      return {
-        success: false,
-        error: 'Failed to accept invitation',
-      };
-    }
+    });
   }
 
   

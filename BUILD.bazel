@@ -45,7 +45,7 @@ npm_package(
         ":tinyland_invitation",
     ],
     package = "@tummycrypt/tinyland-invitation",
-    version = "0.2.2",
+    version = "0.2.4",
     visibility = ["//visibility:public"],
 )
 
@@ -53,6 +53,9 @@ vitest_bin.vitest_test(
     name = "test",
     data = [
         ":node_modules",
+        "BUILD.bazel",
+        "MODULE.bazel",
+        "package.json",
         "tsconfig.json",
         ":node_modules/vitest",
         "vitest.config.ts",
