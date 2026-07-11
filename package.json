@@ -35,7 +35,7 @@
   },
   "dependencies": {},
   "devDependencies": {
-    "@types/node": "^22.0.0",
+    "@types/node": "^26.1.1",
     "typescript": "^5.0.0",
     "vitest": "^4.0.0",
     "publint": "^0.3.18"
