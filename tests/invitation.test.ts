@@ -55,6 +55,21 @@ function buildConfig(mocks: Mocks): InvitationConfig {
   };
 }
 
+function installStatefulStorage(mocks: Mocks): Map<string, string> {
+  const files = new Map<string, string>();
+  mocks.readFile.mockImplementation(async (path: string) => {
+    const data = files.get(path);
+    if (data === undefined) {
+      throw new Error(`ENOENT: ${path}`);
+    }
+    return data;
+  });
+  mocks.writeFile.mockImplementation(async (path: string, data: string) => {
+    files.set(path, data);
+  });
+  return files;
+}
+
 
 function makeInvite(overrides: Partial<AdminInvite> = {}): AdminInvite {
   const future = new Date();
@@ -585,19 +600,10 @@ describe('tinyland-invitation', () => {
   
 
   describe('acceptInvitation', () => {
-    let validToken: string;
+    let files: Map<string, string>;
 
-    beforeEach(async () => {
-      
-      const service = new InvitationService();
-      const created = await service.createInvitation(defaultCreateOptions);
-      validToken = created.invitation!.token;
-
-      
-      mocks.readFile.mockImplementation(async (path: string) => {
-        if (path === '/tmp/admin-users.json') return JSON.stringify([]);
-        throw new Error('not found');
-      });
+    beforeEach(() => {
+      files = installStatefulStorage(mocks);
     });
 
     it('successfully accepts a valid invitation', async () => {
@@ -607,12 +613,6 @@ describe('tinyland-invitation', () => {
       
       const created = await service.createInvitation(defaultCreateOptions);
       const token = created.invitation!.token;
-
-      
-      mocks.readFile.mockImplementation(async (path: string) => {
-        if (path === '/tmp/admin-users.json') return JSON.stringify([]);
-        throw new Error('not found');
-      });
 
       const result = await service.acceptInvitation({
         token,
@@ -631,11 +631,6 @@ describe('tinyland-invitation', () => {
     it('creates user with correct fields', async () => {
       const service = new InvitationService();
       const created = await service.createInvitation(defaultCreateOptions);
-
-      mocks.readFile.mockImplementation(async (path: string) => {
-        if (path === '/tmp/admin-users.json') return JSON.stringify([]);
-        throw new Error('not found');
-      });
 
       const result = await service.acceptInvitation({
         token: created.invitation!.token,
@@ -659,11 +654,6 @@ describe('tinyland-invitation', () => {
       const service = new InvitationService();
       const created = await service.createInvitation(defaultCreateOptions);
 
-      mocks.readFile.mockImplementation(async (path: string) => {
-        if (path === '/tmp/admin-users.json') return JSON.stringify([]);
-        throw new Error('not found');
-      });
-
       await service.acceptInvitation({
         token: created.invitation!.token,
         handle: 'bob',
@@ -678,11 +668,6 @@ describe('tinyland-invitation', () => {
       const created = await service.createInvitation(defaultCreateOptions);
       const token = created.invitation!.token;
 
-      mocks.readFile.mockImplementation(async (path: string) => {
-        if (path === '/tmp/admin-users.json') return JSON.stringify([]);
-        throw new Error('not found');
-      });
-
       await service.acceptInvitation({ token, handle: 'user1', password: 'pass' });
 
       
@@ -690,14 +675,93 @@ describe('tinyland-invitation', () => {
       expect(after).toBeNull();
     });
 
+    it('allows exactly one concurrent acceptance for one token', async () => {
+      const creator = new InvitationService();
+      const created = await creator.createInvitation(defaultCreateOptions);
+      const token = created.invitation!.token;
+      const services = Array.from({ length: 12 }, () => new InvitationService());
+
+      await Promise.all(services.map((service) => service.getInvitation(token)));
+
+      let markHashStarted!: () => void;
+      const hashStarted = new Promise<void>((resolve) => {
+        markHashStarted = resolve;
+      });
+      let releaseHash!: () => void;
+      const hashGate = new Promise<void>((resolve) => {
+        releaseHash = resolve;
+      });
+      mocks.hashPassword.mockImplementation(async (password: string) => {
+        markHashStarted();
+        await hashGate;
+        return `hashed:${password}`;
+      });
+
+      const first = services[0].acceptInvitation({
+        token,
+        handle: 'contender-0',
+        password: 'pass-0',
+      });
+      await hashStarted;
+
+      const remaining = services.slice(1).map((service, index) =>
+        service.acceptInvitation({
+          token,
+          handle: `contender-${index + 1}`,
+          password: `pass-${index + 1}`,
+        }),
+      );
+      releaseHash();
+
+      const results = await Promise.all([first, ...remaining]);
+      const successes = results.filter((result) => result.success);
+      const failures = results.filter((result) => !result.success);
+      const users = JSON.parse(files.get('/tmp/admin-users.json') ?? '[]') as AdminUser[];
+
+      expect(successes).toHaveLength(1);
+      expect(successes[0].user?.handle).toBe('contender-0');
+      expect(failures).toHaveLength(11);
+      expect(failures.every((result) => result.error === 'Invalid or expired invitation')).toBe(true);
+      expect(users).toHaveLength(1);
+      expect(users[0]).toMatchObject({ handle: 'contender-0', role: 'editor' });
+      expect(mocks.hashPassword).toHaveBeenCalledTimes(1);
+      expect(
+        mocks.writeFile.mock.calls.filter(([path]) => path === '/tmp/admin-users.json'),
+      ).toHaveLength(1);
+    });
+
+    it('re-reads used state after a stale service instance enters the token lock', async () => {
+      const acceptingService = new InvitationService();
+      const created = await acceptingService.createInvitation(defaultCreateOptions);
+      const token = created.invitation!.token;
+      const staleService = new InvitationService();
+
+      expect(await staleService.getInvitation(token)).not.toBeNull();
+
+      const accepted = await acceptingService.acceptInvitation({
+        token,
+        handle: 'first-handle',
+        password: 'first-pass',
+      });
+      const replay = await staleService.acceptInvitation({
+        token,
+        handle: 'second-handle',
+        password: 'second-pass',
+      });
+      const users = JSON.parse(files.get('/tmp/admin-users.json') ?? '[]') as AdminUser[];
+
+      expect(accepted.success).toBe(true);
+      expect(replay).toEqual({
+        success: false,
+        error: 'Invalid or expired invitation',
+      });
+      expect(users.map((user) => user.handle)).toEqual(['first-handle']);
+      expect(mocks.hashPassword).toHaveBeenCalledTimes(1);
+    });
+
     it('calls auditLog with INVITATION_ACCEPTED and USER_CREATED', async () => {
       const service = new InvitationService();
       const created = await service.createInvitation(defaultCreateOptions);
-
-      mocks.readFile.mockImplementation(async (path: string) => {
-        if (path === '/tmp/admin-users.json') return JSON.stringify([]);
-        throw new Error('not found');
-      });
 
       mocks.auditLog.mockClear();
 
@@ -722,11 +786,6 @@ describe('tinyland-invitation', () => {
       const service = new InvitationService();
       const created = await service.createInvitation(defaultCreateOptions);
 
-      mocks.readFile.mockImplementation(async (path: string) => {
-        if (path === '/tmp/admin-users.json') return JSON.stringify([]);
-        throw new Error('not found');
-      });
-
       const result = await service.acceptInvitation({
         token: created.invitation!.token,
         handle: 'dana',
@@ -750,11 +809,7 @@ describe('tinyland-invitation', () => {
 
     it('returns error for expired token', async () => {
       const invite = makeExpiredInvite({ token: 'expired-for-accept' });
-      mocks.readFile.mockImplementation(async (path: string) => {
-        if (path === '/tmp/invites.json') return JSON.stringify([invite]);
-        if (path === '/tmp/admin-users.json') return JSON.stringify([]);
-        throw new Error('not found');
-      });
+      files.set('/tmp/invites.json', JSON.stringify([invite]));
 
       const service = new InvitationService();
       const result = await service.acceptInvitation({
@@ -784,10 +839,7 @@ describe('tinyland-invitation', () => {
       const service = new InvitationService();
       const created = await service.createInvitation(defaultCreateOptions);
 
-      mocks.readFile.mockImplementation(async (path: string) => {
-        if (path === '/tmp/admin-users.json') return JSON.stringify([existingUser]);
-        throw new Error('not found');
-      });
+      files.set('/tmp/admin-users.json', JSON.stringify([existingUser]));
 
       const result = await service.acceptInvitation({
         token: created.invitation!.token,
@@ -803,11 +855,6 @@ describe('tinyland-invitation', () => {
       const service = new InvitationService();
       const created = await service.createInvitation(defaultCreateOptions);
 
-      mocks.readFile.mockImplementation(async (path: string) => {
-        if (path === '/tmp/admin-users.json') return JSON.stringify([]);
-        throw new Error('not found');
-      });
-
       await service.acceptInvitation({
         token: created.invitation!.token,
         handle: 'frank',
@@ -820,24 +867,65 @@ describe('tinyland-invitation', () => {
       );
     });
 
-    it('returns error when an exception occurs', async () => {
+    it('keeps the token consumed when user creation fails after the claim', async () => {
       const service = new InvitationService();
       const created = await service.createInvitation(defaultCreateOptions);
+      const token = created.invitation!.token;
 
-      mocks.readFile.mockImplementation(async (path: string) => {
-        if (path === '/tmp/admin-users.json') return JSON.stringify([]);
-        throw new Error('not found');
-      });
       mocks.hashPassword.mockRejectedValueOnce(new Error('hash failure'));
 
       const result = await service.acceptInvitation({
-        token: created.invitation!.token,
+        token,
         handle: 'eve',
         password: 'pass',
       });
+      const retry = await service.acceptInvitation({
+        token,
+        handle: 'eve-retry',
+        password: 'pass',
+      });
+      const persistedInvites = JSON.parse(files.get('/tmp/invites.json') ?? '[]') as AdminInvite[];
 
       expect(result.success).toBe(false);
       expect(result.error).toBe('Failed to accept invitation');
+      expect(retry).toEqual({
+        success: false,
+        error: 'Invalid or expired invitation',
+      });
+      expect(persistedInvites).toHaveLength(1);
+      expect(persistedInvites[0].usedAt).toEqual(expect.any(String));
+      expect(persistedInvites[0].usedBy).toEqual(expect.any(String));
+      expect(files.has('/tmp/admin-users.json')).toBe(false);
+    });
+
+    it('fails closed in-process when the token claim cannot be persisted', async () => {
+      const service = new InvitationService();
+      const created = await service.createInvitation(defaultCreateOptions);
+      const token = created.invitation!.token;
+
+      mocks.writeFile.mockRejectedValueOnce(new Error('claim write failed'));
+
+      const result = await service.acceptInvitation({
+        token,
+        handle: 'claim-failure',
+        password: 'pass',
+      });
+      const retry = await service.acceptInvitation({
+        token,
+        handle: 'claim-failure-retry',
+        password: 'pass',
+      });
+
+      expect(result).toEqual({
+        success: false,
+        error: 'Failed to accept invitation',
+      });
+      expect(retry).toEqual({
+        success: false,
+        error: 'Invalid or expired invitation',
+      });
+      expect(mocks.hashPassword).not.toHaveBeenCalled();
+      expect(files.has('/tmp/admin-users.json')).toBe(false);
     });
   });
 
@@ -1070,6 +1158,7 @@ describe('tinyland-invitation', () => {
 
   describe('getStatistics', () => {
     it('returns correct counts for mixed invitation states', async () => {
+      installStatefulStorage(mocks);
       const service = new InvitationService();
 
       
@@ -1077,11 +1166,6 @@ describe('tinyland-invitation', () => {
       await service.createInvitation(defaultCreateOptions);
       const third = await service.createInvitation(defaultCreateOptions);
 
-      
-      mocks.readFile.mockImplementation(async (path: string) => {
-        if (path === '/tmp/admin-users.json') return JSON.stringify([]);
-        throw new Error('not found');
-      });
       await service.acceptInvitation({
         token: third.invitation!.token,
         handle: 'statsuser',
@@ -1127,14 +1211,10 @@ describe('tinyland-invitation', () => {
     });
 
     it('counts used invitations correctly', async () => {
+      installStatefulStorage(mocks);
       const service = new InvitationService();
       const c1 = await service.createInvitation(defaultCreateOptions);
       const c2 = await service.createInvitation(defaultCreateOptions);
-
-      mocks.readFile.mockImplementation(async (path: string) => {
-        if (path === '/tmp/admin-users.json') return JSON.stringify([]);
-        throw new Error('not found');
-      });
 
       
       let handleCounter = 0;
@@ -1329,13 +1409,9 @@ describe('tinyland-invitation', () => {
     });
 
     it('reads admin users from the configured path during accept', async () => {
+      installStatefulStorage(mocks);
       const service = new InvitationService();
       const created = await service.createInvitation(defaultCreateOptions);
-
-      mocks.readFile.mockImplementation(async (path: string) => {
-        if (path === '/tmp/admin-users.json') return JSON.stringify([]);
-        throw new Error('not found');
-      });
 
       await service.acceptInvitation({
         token: created.invitation!.token,
@@ -1347,13 +1423,9 @@ describe('tinyland-invitation', () => {
     });
 
     it('writes admin users to the configured path during accept', async () => {
+      installStatefulStorage(mocks);
       const service = new InvitationService();
       const created = await service.createInvitation(defaultCreateOptions);
-
-      mocks.readFile.mockImplementation(async (path: string) => {
-        if (path === '/tmp/admin-users.json') return JSON.stringify([]);
-        throw new Error('not found');
-      });
 
       await service.acceptInvitation({
         token: created.invitation!.token,
@@ -1368,11 +1440,9 @@ describe('tinyland-invitation', () => {
     });
 
     it('handles missing admin users file gracefully', async () => {
+      installStatefulStorage(mocks);
       const service = new InvitationService();
       const created = await service.createInvitation(defaultCreateOptions);
-
-      
-      mocks.readFile.mockRejectedValue(new Error('ENOENT'));
 
       const result = await service.acceptInvitation({
         token: created.invitation!.token,
@@ -1513,13 +1583,10 @@ describe('tinyland-invitation', () => {
     });
 
     it('handles the case where admin users file returns invalid JSON', async () => {
+      const files = installStatefulStorage(mocks);
       const service = new InvitationService();
       const created = await service.createInvitation(defaultCreateOptions);
-
-      mocks.readFile.mockImplementation(async (path: string) => {
-        if (path === '/tmp/admin-users.json') return 'not json';
-        throw new Error('not found');
-      });
+      files.set('/tmp/admin-users.json', 'not json');
 
       
       
@@ -1641,6 +1708,7 @@ describe('tinyland-invitation', () => {
 
   describe('full workflow', () => {
     it('create -> get -> accept -> verify used', async () => {
+      installStatefulStorage(mocks);
       const service = new InvitationService();
 
       
@@ -1658,12 +1726,6 @@ describe('tinyland-invitation', () => {
       const fetched = await service.getInvitation(token);
       expect(fetched).not.toBeNull();
       expect(fetched!.role).toBe('moderator');
-
-      
-      mocks.readFile.mockImplementation(async (path: string) => {
-        if (path === '/tmp/admin-users.json') return JSON.stringify([]);
-        throw new Error('not found');
-      });
 
       const accepted = await service.acceptInvitation({
         token,

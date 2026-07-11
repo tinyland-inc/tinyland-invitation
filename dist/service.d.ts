@@ -8,6 +8,7 @@ export declare class InvitationService {
     private cleanupExpired;
     createInvitation(options: InvitationCreateOptions): Promise<InvitationResult>;
     getInvitation(token: string): Promise<AdminInvite | null>;
+    private getPendingInvitation;
     acceptInvitation(data: InvitationAcceptData): Promise<AcceptResult>;
     listPendingInvitations(): Promise<AdminInvite[]>;
     revokeInvitation(token: string, revokedBy: string): Promise<boolean>;
