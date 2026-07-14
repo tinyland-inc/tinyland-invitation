@@ -11,6 +11,7 @@ reviewed `tinyland-rbac/1` authority explicitly:
 import { canManageRole, RBAC_AUTHORITY } from '@tummycrypt/tinyland-auth';
 import {
   configure,
+  createInvitation,
   createInvitationRoleAuthority,
 } from '@tummycrypt/tinyland-invitation';
 
@@ -20,6 +21,23 @@ configure({
     version: RBAC_AUTHORITY.version,
     canManageRole,
   }),
+  resolveInvitationPrincipal: async (serverAuthContext) => {
+    const session = requireAuthenticatedServerSession(serverAuthContext);
+    const user = await adminUsers.findById(session.principalId);
+    if (!user) return null;
+
+    return {
+      id: user.id,
+      role: user.role,
+      handle: user.handle,
+      isActive: user.isActive,
+    };
+  },
+});
+
+await createInvitation(serverAuthContext, {
+  role: 'editor',
+  handle: 'new-editor',
 });
 ```
 
@@ -32,14 +50,27 @@ The code that calls `configure()` remains the policy trust boundary.
 
 The optional `canCreateInviteForRole` hook runs only after the authority allows
 a role pair and can therefore veto an invitation, but cannot elevate one.
+It receives the exact principal returned by `resolveInvitationPrincipal`, not
+identity fields from the invitation request.
 
 Applications with local role vocabularies must translate those roles through a
 reviewed auth-package translation contract inside `canManageRole`. Unmapped
 roles must remain denied.
 
-`createdByRole` is asserted by the calling application. Routes must derive it
-from an authenticated server-side principal, never request data. Authority
-callbacks must be bound functions or closures and must not depend on `this`.
+`resolveInvitationPrincipal` is the application trust boundary. It must derive
+the opaque context from authenticated server state, reload the principal on
+every call, and never read identity or role from request data. It must map the
+record to exactly `{ id, role, handle, isActive }`; missing, inactive, deleted,
+malformed, accessor-backed, or extra-field results deny before invitation
+storage writes. Resolver exceptions also deny and emit an
+`INVITATION_PRINCIPAL_RESOLUTION_ERROR` event without request or context
+identity. Authority callbacks must be bound functions or closures and must not
+depend on `this`.
+
+`InvitationCreateOptions` contains invite request data only. `createdBy`,
+`createdByRole`, and `createdByHandle` are intentionally absent. The resolved
+principal is the sole source for role checks, narrowing hooks, persistence, and
+audit identity.
 
 ## Breaking migration
 
@@ -57,3 +88,5 @@ unmapped local aliases deny. The planned release sequence is:
 
 Because adapter provenance is package-instance-local, creating an adapter with
 one installed copy and passing it to another is rejected during `configure()`.
+This remains source-only work on the invitation 0.3 train: the package version
+is not changed and no release is produced by this patch.

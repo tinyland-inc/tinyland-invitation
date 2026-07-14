@@ -2,6 +2,9 @@ import { assertInvitationRoleAuthority } from './roles.js';
 let currentConfig = null;
 export function configure(config) {
     assertInvitationRoleAuthority(config.roleAuthority);
+    if (typeof config.resolveInvitationPrincipal !== 'function') {
+        throw new Error('resolveInvitationPrincipal must be configured');
+    }
     currentConfig = config;
 }
 export function getConfig() {

@@ -4,6 +4,35 @@ import { InvitationError } from './errors.js';
 import { authorityAllowsInvitation } from './roles.js';
 const acceptanceLocks = new Map();
 const failedAcceptanceClaims = new Set();
+const INVITATION_PRINCIPAL_KEYS = ['id', 'role', 'handle', 'isActive'];
+function ownDataProperty(value, key) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    return descriptor && 'value' in descriptor ? descriptor.value : undefined;
+}
+function toInvitationPrincipal(value) {
+    if (typeof value !== 'object' || value === null) {
+        return null;
+    }
+    const keys = Reflect.ownKeys(value);
+    if (keys.length !== INVITATION_PRINCIPAL_KEYS.length ||
+        !INVITATION_PRINCIPAL_KEYS.every((key) => keys.includes(key))) {
+        return null;
+    }
+    const id = ownDataProperty(value, 'id');
+    const role = ownDataProperty(value, 'role');
+    const handle = ownDataProperty(value, 'handle');
+    const isActive = ownDataProperty(value, 'isActive');
+    if (typeof id !== 'string' ||
+        id.trim().length === 0 ||
+        typeof role !== 'string' ||
+        role.trim().length === 0 ||
+        typeof handle !== 'string' ||
+        handle.trim().length === 0 ||
+        typeof isActive !== 'boolean') {
+        return null;
+    }
+    return Object.freeze({ id, role, handle, isActive });
+}
 // This serializes a token across every InvitationService instance in one Node
 // process. It is deliberately not presented as cross-process or cross-replica
 // compare-and-set; consumers that share storage across replicas still need a
@@ -73,16 +102,17 @@ export class InvitationService {
             await this.saveInvitations();
         }
     }
-    async createInvitation(options) {
-        await this.ensureInitialized();
-        const config = getConfig();
+    async createInvitation(serverAuthContext, options) {
+        const principal = await this.resolveInvitationPrincipal(serverAuthContext);
         // Fail-closed authority gate (TIN-1607 R3). Throws InvitationError('forbidden')
         // when the creator does not strictly outrank the target role. Deliberately
         // OUTSIDE the try/catch so a denial can never be masked as a generic failure,
         // and a mis-wired consumer cannot silently mint an unrestricted invitation.
-        if (!(await this.canCreateInviteForRole(options.createdBy, options.role, options.createdByRole))) {
+        if (!principal || !(await this.canCreateInviteForRole(principal, options.role))) {
             throw new InvitationError('Insufficient permissions to create invitation for this role', 'forbidden');
         }
+        await this.ensureInitialized();
+        const config = getConfig();
         try {
             const token = crypto.randomBytes(32).toString('hex');
             const id = config.generateId();
@@ -94,8 +124,8 @@ export class InvitationService {
                 id,
                 token,
                 role: options.role,
-                createdBy: options.createdBy,
-                createdByHandle: options.createdByHandle || options.createdBy,
+                createdBy: principal.id,
+                createdByHandle: principal.handle,
                 createdAt: new Date().toISOString(),
                 expiresAt: expiresAt.toISOString(),
                 temporaryTotpSecret: totpSecret,
@@ -110,7 +140,9 @@ export class InvitationService {
                 invitationId: id,
                 handle: options.handle,
                 role: options.role,
-                createdBy: options.createdBy,
+                createdBy: principal.id,
+                createdByRole: principal.role,
+                createdByHandle: principal.handle,
             });
             return {
                 success: true,
@@ -275,15 +307,37 @@ export class InvitationService {
             used: all.filter((i) => !!i.usedAt).length,
         };
     }
+    async resolveInvitationPrincipal(serverAuthContext) {
+        const config = getConfig();
+        try {
+            const principal = toInvitationPrincipal(await config.resolveInvitationPrincipal(serverAuthContext));
+            return principal?.isActive === true ? principal : null;
+        }
+        catch (error) {
+            await this.auditPrincipalResolutionFailure(error);
+            return null;
+        }
+    }
+    async auditPrincipalResolutionFailure(error) {
+        const config = getConfig();
+        try {
+            await config.auditLog('INVITATION_PRINCIPAL_RESOLUTION_ERROR', {
+                reason: 'resolver_error',
+                errorType: error instanceof Error ? error.name : typeof error,
+            });
+        }
+        catch (auditError) {
+            console.error('Failed to audit invitation principal resolution error:', auditError);
+        }
+    }
     // The versioned authority makes the rank decision. A consumer hook can add a
     // narrower realm rule, but it cannot turn an authority denial into an allow.
-    async canCreateInviteForRole(creatorId, targetRole, creatorRole) {
+    async canCreateInviteForRole(principal, targetRole) {
         const config = getConfig();
-        const decision = {
-            createdBy: creatorId,
-            createdByRole: creatorRole,
+        const decision = Object.freeze({
+            principal,
             targetRole,
-        };
+        });
         let authorityAllowed = false;
         try {
             authorityAllowed = await authorityAllowsInvitation(config.roleAuthority, decision);
@@ -311,8 +365,9 @@ export class InvitationService {
         try {
             await config.auditLog('INVITATION_ROLE_AUTHORITY_ERROR', {
                 reason,
-                createdBy: decision.createdBy,
-                createdByRole: decision.createdByRole,
+                createdBy: decision.principal.id,
+                createdByRole: decision.principal.role,
+                createdByHandle: decision.principal.handle,
                 targetRole: decision.targetRole,
                 errorType: error instanceof Error ? error.name : typeof error,
             });
@@ -333,8 +388,8 @@ export class InvitationService {
     }
 }
 export const invitationService = new InvitationService();
-export async function createInvitation(options) {
-    return invitationService.createInvitation(options);
+export async function createInvitation(serverAuthContext, options) {
+    return invitationService.createInvitation(serverAuthContext, options);
 }
 export async function acceptInvitation(data) {
     return invitationService.acceptInvitation(data);

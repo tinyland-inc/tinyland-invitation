@@ -1,4 +1,4 @@
-import type { AdminRole } from './types.js';
+import type { AdminRole, InvitationPrincipal } from './types.js';
 
 export const SUPPORTED_RBAC_AUTHORITY_VERSION = 'tinyland-rbac/1' as const;
 
@@ -23,8 +23,7 @@ export interface InvitationRoleAuthoritySource {
 }
 
 export interface InvitationRoleDecision {
-  readonly createdBy: string;
-  readonly createdByRole?: AdminRole;
+  readonly principal: InvitationPrincipal;
   readonly targetRole: AdminRole;
 }
 
@@ -103,12 +102,12 @@ export async function authorityAllowsInvitation(
   authority: InvitationRoleAuthority | undefined,
   decision: InvitationRoleDecision,
 ): Promise<boolean> {
-  if (!decision.createdByRole || !isInvitationRoleAuthority(authority)) {
+  if (!decision.principal.isActive || !isInvitationRoleAuthority(authority)) {
     return false;
   }
 
   const canManageRole = authority.canManageRole;
   return (
-    (await canManageRole(decision.createdByRole, decision.targetRole)) === true
+    (await canManageRole(decision.principal.role, decision.targetRole)) === true
   );
 }
