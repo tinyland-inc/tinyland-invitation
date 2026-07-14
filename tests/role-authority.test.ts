@@ -43,10 +43,21 @@ function canonicalDecision(actorRole: string, targetRole: string): boolean {
   );
 }
 
-function makeAuthority(canManageRole = canonicalDecision) {
+function makeAuthority(
+  canManageRole: InvitationRoleAuthoritySource['canManageRole'] = canonicalDecision,
+) {
   return createInvitationRoleAuthority({
     version: SUPPORTED_RBAC_AUTHORITY_VERSION,
     canManageRole,
+  });
+}
+
+function principal(role: string, isActive = true) {
+  return Object.freeze({
+    id: 'actor',
+    role,
+    handle: 'actor-handle',
+    isActive,
   });
 }
 
@@ -74,8 +85,7 @@ describe('versioned invitation role authority', () => {
 
     await expect(
       authorityAllowsInvitation(authority, {
-        createdBy: 'root',
-        createdByRole: 'admin',
+        principal: principal('admin'),
         targetRole: 'viewer',
       }),
     ).resolves.toBe(true);
@@ -127,8 +137,7 @@ describe('versioned invitation role authority', () => {
     for (const authority of [forged, spread]) {
       await expect(
         authorityAllowsInvitation(authority, {
-          createdBy: 'viewer',
-          createdByRole: 'viewer',
+          principal: principal('viewer'),
           targetRole: 'admin',
         }),
       ).resolves.toBe(false);
@@ -142,8 +151,7 @@ describe('versioned invitation role authority', () => {
       for (const targetRole of ROLES) {
         await expect(
           authorityAllowsInvitation(authority, {
-            createdBy: actorRole,
-            createdByRole: actorRole,
+            principal: principal(actorRole),
             targetRole,
           }),
         ).resolves.toBe(canonicalDecision(actorRole, targetRole));
@@ -164,8 +172,7 @@ describe('versioned invitation role authority', () => {
     ] as const) {
       await expect(
         authorityAllowsInvitation(authority, {
-          createdBy: 'actor',
-          createdByRole: actorRole,
+          principal: principal(actorRole as string),
           targetRole,
         }),
       ).resolves.toBe(false);
@@ -180,8 +187,7 @@ describe('versioned invitation role authority', () => {
       (() => 'yes') as unknown as InvitationRoleAuthoritySource['canManageRole'],
     );
     const decision = {
-      createdBy: 'root',
-      createdByRole: 'super_admin',
+      principal: principal('super_admin'),
       targetRole: 'viewer',
     };
 
@@ -189,5 +195,18 @@ describe('versioned invitation role authority', () => {
       'authority unavailable',
     );
     await expect(authorityAllowsInvitation(truthy, decision)).resolves.toBe(false);
+  });
+
+  it('denies an inactive resolved principal before consulting authority', async () => {
+    const canManageRole = vi.fn(() => true);
+    const authority = makeAuthority(canManageRole);
+
+    await expect(
+      authorityAllowsInvitation(authority, {
+        principal: principal('super_admin', false),
+        targetRole: 'viewer',
+      }),
+    ).resolves.toBe(false);
+    expect(canManageRole).not.toHaveBeenCalled();
   });
 });

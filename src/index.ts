@@ -6,7 +6,7 @@
 
 
 export { configure, getConfig, resetConfig } from './config.js';
-export type { InvitationConfig } from './config.js';
+export type { InvitationConfig, InvitationPrincipalResolver } from './config.js';
 
 export {
   InvitationService,
@@ -33,6 +33,7 @@ export type {
   AdminRole,
   AdminInvite,
   AdminUser,
+  InvitationPrincipal,
   InvitationCreateOptions,
   InvitationAcceptData,
   InvitationResult,

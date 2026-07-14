@@ -57,9 +57,9 @@ export function assertInvitationRoleAuthority(value) {
  * propagate so the service can record an operational audit event before deny.
  */
 export async function authorityAllowsInvitation(authority, decision) {
-    if (!decision.createdByRole || !isInvitationRoleAuthority(authority)) {
+    if (!decision.principal.isActive || !isInvitationRoleAuthority(authority)) {
         return false;
     }
     const canManageRole = authority.canManageRole;
-    return ((await canManageRole(decision.createdByRole, decision.targetRole)) === true);
+    return ((await canManageRole(decision.principal.role, decision.targetRole)) === true);
 }

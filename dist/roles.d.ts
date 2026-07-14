@@ -1,4 +1,4 @@
-import type { AdminRole } from './types.js';
+import type { AdminRole, InvitationPrincipal } from './types.js';
 export declare const SUPPORTED_RBAC_AUTHORITY_VERSION: "tinyland-rbac/1";
 declare const INVITATION_ROLE_AUTHORITY: unique symbol;
 export interface InvitationRoleAuthority {
@@ -11,8 +11,7 @@ export interface InvitationRoleAuthoritySource {
     readonly canManageRole: (actorRole: AdminRole, targetRole: AdminRole) => boolean | Promise<boolean>;
 }
 export interface InvitationRoleDecision {
-    readonly createdBy: string;
-    readonly createdByRole?: AdminRole;
+    readonly principal: InvitationPrincipal;
     readonly targetRole: AdminRole;
 }
 /**

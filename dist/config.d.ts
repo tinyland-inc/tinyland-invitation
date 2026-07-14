@@ -1,4 +1,6 @@
 import type { InvitationRoleAuthority, InvitationRoleDecision } from './roles.js';
+import type { InvitationPrincipal } from './types.js';
+export type InvitationPrincipalResolver = (serverAuthContext: unknown) => InvitationPrincipal | null | undefined | Promise<InvitationPrincipal | null | undefined>;
 export interface InvitationConfig {
     readFile: (path: string) => Promise<string>;
     writeFile: (path: string, data: string) => Promise<void>;
@@ -21,6 +23,8 @@ export interface InvitationConfig {
     publicUrl: string;
     /** Required versioned rank authority. Missing or invalid authority denies. */
     roleAuthority: InvitationRoleAuthority;
+    /** Reload the current principal from authenticated server-owned state. */
+    resolveInvitationPrincipal: InvitationPrincipalResolver;
     /** Optional consumer veto. It may narrow, but never widen, role authority. */
     canCreateInviteForRole?: (args: InvitationRoleDecision) => boolean | Promise<boolean>;
 }

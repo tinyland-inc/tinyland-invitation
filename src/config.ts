@@ -7,6 +7,15 @@
 
 import { assertInvitationRoleAuthority } from './roles.js';
 import type { InvitationRoleAuthority, InvitationRoleDecision } from './roles.js';
+import type { InvitationPrincipal } from './types.js';
+
+export type InvitationPrincipalResolver = (
+  serverAuthContext: unknown,
+) =>
+  | InvitationPrincipal
+  | null
+  | undefined
+  | Promise<InvitationPrincipal | null | undefined>;
 
 export interface InvitationConfig {
   
@@ -44,6 +53,9 @@ export interface InvitationConfig {
   /** Required versioned rank authority. Missing or invalid authority denies. */
   roleAuthority: InvitationRoleAuthority;
 
+  /** Reload the current principal from authenticated server-owned state. */
+  resolveInvitationPrincipal: InvitationPrincipalResolver;
+
   /** Optional consumer veto. It may narrow, but never widen, role authority. */
   canCreateInviteForRole?: (
     args: InvitationRoleDecision,
@@ -58,6 +70,9 @@ let currentConfig: InvitationConfig | null = null;
 
 export function configure(config: InvitationConfig): void {
   assertInvitationRoleAuthority(config.roleAuthority);
+  if (typeof config.resolveInvitationPrincipal !== 'function') {
+    throw new Error('resolveInvitationPrincipal must be configured');
+  }
   currentConfig = config;
 }
 

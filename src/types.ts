@@ -44,12 +44,17 @@ export interface AdminUser {
 }
 
 
+export interface InvitationPrincipal {
+  readonly id: string;
+  readonly role: AdminRole;
+  readonly handle: string;
+  readonly isActive: boolean;
+}
+
+
 export interface InvitationCreateOptions {
   handle?: string;
   role: AdminRole;
-  createdBy: string;
-  createdByRole?: AdminRole;
-  createdByHandle: string;
   expiresInHours?: number;
   message?: string;
   skipEmail?: boolean;

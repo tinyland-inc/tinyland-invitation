@@ -2,7 +2,7 @@
 
 
 
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, expectTypeOf, vi, beforeEach, afterEach } from 'vitest';
 import { configure, getConfig, resetConfig } from '../src/config.js';
 import { InvitationService } from '../src/service.js';
 import {
@@ -15,8 +15,17 @@ import type {
   AdminInvite,
   AdminUser,
   InvitationCreateOptions,
+  InvitationPrincipal,
 } from '../src/index.js';
 
+
+const DEFAULT_SERVER_AUTH_CONTEXT = Object.freeze({ sessionId: 'server-session-1' });
+const DEFAULT_PRINCIPAL: InvitationPrincipal = Object.freeze({
+  id: 'admin-1',
+  role: 'super_admin',
+  handle: 'admin-handle',
+  isActive: true,
+});
 
 
 
@@ -34,6 +43,11 @@ function createMocks() {
     ),
     generateQrCode: vi.fn(async () => 'data:image/png;base64,qrcode'),
     auditLog: vi.fn<(eventType: string, data: Record<string, unknown>) => Promise<void>>().mockResolvedValue(undefined),
+    resolveInvitationPrincipal: vi.fn<
+      (serverAuthContext: unknown) => Promise<InvitationPrincipal | null | undefined>
+    >(async (serverAuthContext: unknown) =>
+      serverAuthContext === DEFAULT_SERVER_AUTH_CONTEXT ? DEFAULT_PRINCIPAL : null,
+    ),
   };
 }
 
@@ -89,7 +103,17 @@ function buildConfig(mocks: Mocks): InvitationConfig {
     auditLog: mocks.auditLog,
     publicUrl: 'http://localhost:9080',
     roleAuthority: createTestRoleAuthority(),
+    resolveInvitationPrincipal: mocks.resolveInvitationPrincipal,
   };
+}
+
+function setResolvedPrincipal(
+  mocks: Mocks,
+  overrides: Partial<InvitationPrincipal>,
+): InvitationPrincipal {
+  const resolved = Object.freeze({ ...DEFAULT_PRINCIPAL, ...overrides });
+  mocks.resolveInvitationPrincipal.mockResolvedValue(resolved);
+  return resolved;
 }
 
 function installStatefulStorage(mocks: Mocks): Map<string, string> {
@@ -136,13 +160,8 @@ function makeUsedInvite(overrides: Partial<AdminInvite> = {}): AdminInvite {
 }
 
 
-// createdByRole is super_admin so the injected test authority permits these
-// fixture invites (super_admin strictly outranks editor).
 const defaultCreateOptions: InvitationCreateOptions = {
   role: 'editor',
-  createdBy: 'admin-1',
-  createdByRole: 'super_admin',
-  createdByHandle: 'admin-handle',
 };
 
 
@@ -195,6 +214,15 @@ describe('tinyland-invitation', () => {
       configure(config2);
       expect(getConfig()).toBe(config2);
     });
+
+    it('rejects configuration without a principal resolver', () => {
+      expect(() =>
+        configure({
+          ...buildConfig(mocks),
+          resolveInvitationPrincipal: undefined,
+        } as unknown as InvitationConfig),
+      ).toThrow('resolveInvitationPrincipal must be configured');
+    });
   });
 
   
@@ -202,25 +230,36 @@ describe('tinyland-invitation', () => {
   
 
   describe('createInvitation', () => {
+    it('excludes actor identity and role from the public request type', () => {
+      expectTypeOf<InvitationCreateOptions>().not.toHaveProperty('createdBy');
+      expectTypeOf<InvitationCreateOptions>().not.toHaveProperty('createdByRole');
+      expectTypeOf<InvitationCreateOptions>().not.toHaveProperty('createdByHandle');
+      expectTypeOf<InvitationService['createInvitation']>()
+        .parameters.toEqualTypeOf<[unknown, InvitationCreateOptions]>();
+    });
+
     it('throws InvitationError when the narrowing hook denies an authority allow', async () => {
       const config = buildConfig(mocks);
-      const canCreateInviteForRole = vi.fn(() => false);
+      const canCreateInviteForRole = vi.fn<
+        NonNullable<InvitationConfig['canCreateInviteForRole']>
+      >(() => false);
       configure({ ...config, canCreateInviteForRole });
 
       const service = new InvitationService();
       await expect(
-        service.createInvitation({
+        service.createInvitation(DEFAULT_SERVER_AUTH_CONTEXT, {
           ...defaultCreateOptions,
-          createdByRole: 'super_admin',
           role: 'editor',
         }),
       ).rejects.toThrow('Insufficient permissions to create invitation for this role');
 
       expect(canCreateInviteForRole).toHaveBeenCalledWith({
-        createdBy: 'admin-1',
-        createdByRole: 'super_admin',
+        principal: DEFAULT_PRINCIPAL,
         targetRole: 'editor',
       });
+      const decision = canCreateInviteForRole.mock.calls[0]![0];
+      expect(Object.isFrozen(decision)).toBe(true);
+      expect(Object.isFrozen(decision.principal)).toBe(true);
       expect(mocks.writeFile).not.toHaveBeenCalled();
     });
 
@@ -230,25 +269,24 @@ describe('tinyland-invitation', () => {
       configure({ ...config, canCreateInviteForRole });
 
       const service = new InvitationService();
-      const result = await service.createInvitation({
-        ...defaultCreateOptions,
-        createdByRole: 'super_admin',
-      });
+      const result = await service.createInvitation(
+        DEFAULT_SERVER_AUTH_CONTEXT,
+        defaultCreateOptions,
+      );
 
       expect(result.success).toBe(true);
       expect(canCreateInviteForRole).toHaveBeenCalledWith({
-        createdBy: 'admin-1',
-        createdByRole: 'super_admin',
+        principal: DEFAULT_PRINCIPAL,
         targetRole: 'editor',
       });
     });
 
     it('applies the injected authority when no narrowing hook is configured', async () => {
+      setResolvedPrincipal(mocks, { role: 'editor' });
       const service = new InvitationService();
       await expect(
-        service.createInvitation({
+        service.createInvitation(DEFAULT_SERVER_AUTH_CONTEXT, {
           ...defaultCreateOptions,
-          createdByRole: 'editor',
           role: 'admin',
         }),
       ).rejects.toBeInstanceOf(InvitationError);
@@ -257,10 +295,10 @@ describe('tinyland-invitation', () => {
     });
 
     it('allows creation when the authority says the creator strictly outranks the target', async () => {
+      setResolvedPrincipal(mocks, { role: 'admin' });
       const service = new InvitationService();
-      const result = await service.createInvitation({
+      const result = await service.createInvitation(DEFAULT_SERVER_AUTH_CONTEXT, {
         ...defaultCreateOptions,
-        createdByRole: 'admin',
         role: 'editor',
       });
 
@@ -270,7 +308,7 @@ describe('tinyland-invitation', () => {
 
     it('successfully creates an invitation with default expiry', async () => {
       const service = new InvitationService();
-      const result = await service.createInvitation(defaultCreateOptions);
+      const result = await service.createInvitation(DEFAULT_SERVER_AUTH_CONTEXT, defaultCreateOptions);
 
       expect(result.success).toBe(true);
       expect(result.invitation).toBeDefined();
@@ -282,7 +320,7 @@ describe('tinyland-invitation', () => {
 
     it('uses default expiry hours from authConfig', async () => {
       const service = new InvitationService();
-      const result = await service.createInvitation(defaultCreateOptions);
+      const result = await service.createInvitation(DEFAULT_SERVER_AUTH_CONTEXT, defaultCreateOptions);
 
       const expiresAt = new Date(result.invitation!.expiresAt);
       const now = new Date();
@@ -294,7 +332,7 @@ describe('tinyland-invitation', () => {
 
     it('respects custom expiresInHours', async () => {
       const service = new InvitationService();
-      const result = await service.createInvitation({
+      const result = await service.createInvitation(DEFAULT_SERVER_AUTH_CONTEXT, {
         ...defaultCreateOptions,
         expiresInHours: 72,
       });
@@ -308,7 +346,7 @@ describe('tinyland-invitation', () => {
 
     it('generates a 64-character hex token', async () => {
       const service = new InvitationService();
-      const result = await service.createInvitation(defaultCreateOptions);
+      const result = await service.createInvitation(DEFAULT_SERVER_AUTH_CONTEXT, defaultCreateOptions);
 
       const token = result.invitation!.token;
       expect(token).toMatch(/^[0-9a-f]{64}$/);
@@ -316,7 +354,7 @@ describe('tinyland-invitation', () => {
 
     it('generates a TOTP secret via DI', async () => {
       const service = new InvitationService();
-      const result = await service.createInvitation(defaultCreateOptions);
+      const result = await service.createInvitation(DEFAULT_SERVER_AUTH_CONTEXT, defaultCreateOptions);
 
       expect(mocks.generateTotpSecret).toHaveBeenCalled();
       expect(result.totpSecret).toBe('JBSWY3DPEHPK3PXP');
@@ -325,7 +363,7 @@ describe('tinyland-invitation', () => {
 
     it('generates a QR code via DI', async () => {
       const service = new InvitationService();
-      const result = await service.createInvitation(defaultCreateOptions);
+      const result = await service.createInvitation(DEFAULT_SERVER_AUTH_CONTEXT, defaultCreateOptions);
 
       expect(mocks.generateQrCode).toHaveBeenCalled();
       expect(result.qrCode).toBe('data:image/png;base64,qrcode');
@@ -333,7 +371,7 @@ describe('tinyland-invitation', () => {
 
     it('builds invite URL from publicUrl config', async () => {
       const service = new InvitationService();
-      const result = await service.createInvitation(defaultCreateOptions);
+      const result = await service.createInvitation(DEFAULT_SERVER_AUTH_CONTEXT, defaultCreateOptions);
 
       expect(result.inviteUrl).toContain('http://localhost:9080/admin/accept-invite?token=');
       expect(result.inviteUrl).toContain(result.invitation!.token);
@@ -341,7 +379,7 @@ describe('tinyland-invitation', () => {
 
     it('calls generateKeyUri with correct arguments when handle is provided', async () => {
       const service = new InvitationService();
-      await service.createInvitation({ ...defaultCreateOptions, handle: 'alice' });
+      await service.createInvitation(DEFAULT_SERVER_AUTH_CONTEXT, { ...defaultCreateOptions, handle: 'alice' });
 
       expect(mocks.generateKeyUri).toHaveBeenCalledWith(
         'alice',
@@ -352,7 +390,7 @@ describe('tinyland-invitation', () => {
 
     it('uses fallback account name when handle is not provided', async () => {
       const service = new InvitationService();
-      await service.createInvitation(defaultCreateOptions);
+      await service.createInvitation(DEFAULT_SERVER_AUTH_CONTEXT, defaultCreateOptions);
 
       expect(mocks.generateKeyUri).toHaveBeenCalledWith(
         expect.stringMatching(/^invite-/),
@@ -363,25 +401,27 @@ describe('tinyland-invitation', () => {
 
     it('calls auditLog with INVITATION_CREATED', async () => {
       const service = new InvitationService();
-      await service.createInvitation(defaultCreateOptions);
+      await service.createInvitation(DEFAULT_SERVER_AUTH_CONTEXT, defaultCreateOptions);
 
       expect(mocks.auditLog).toHaveBeenCalledWith('INVITATION_CREATED', {
         invitationId: 'test-id-123',
         handle: undefined,
         role: 'editor',
         createdBy: 'admin-1',
+        createdByRole: 'super_admin',
+        createdByHandle: 'admin-handle',
       });
     });
 
     it('calls generateId via DI', async () => {
       const service = new InvitationService();
-      await service.createInvitation(defaultCreateOptions);
+      await service.createInvitation(DEFAULT_SERVER_AUTH_CONTEXT, defaultCreateOptions);
       expect(mocks.generateId).toHaveBeenCalled();
     });
 
     it('saves invitations to file after creation', async () => {
       const service = new InvitationService();
-      await service.createInvitation(defaultCreateOptions);
+      await service.createInvitation(DEFAULT_SERVER_AUTH_CONTEXT, defaultCreateOptions);
 
       expect(mocks.writeFile).toHaveBeenCalledWith(
         '/tmp/invites.json',
@@ -392,25 +432,38 @@ describe('tinyland-invitation', () => {
     it('returns error when an exception occurs during creation', async () => {
       mocks.generateQrCode.mockRejectedValueOnce(new Error('QR gen failed'));
       const service = new InvitationService();
-      const result = await service.createInvitation(defaultCreateOptions);
+      const result = await service.createInvitation(DEFAULT_SERVER_AUTH_CONTEXT, defaultCreateOptions);
 
       expect(result.success).toBe(false);
       expect(result.error).toBe('Failed to create invitation');
     });
 
-    it('uses createdBy as createdByHandle when createdByHandle is empty', async () => {
+    it('ignores forged runtime actor fields and uses only the resolved principal', async () => {
       const service = new InvitationService();
-      const result = await service.createInvitation({
+      const forgedRequest = {
         ...defaultCreateOptions,
-        createdByHandle: '',
-      });
+        createdBy: 'forged-id',
+        createdByRole: 'root',
+        createdByHandle: 'forged-handle',
+      } as InvitationCreateOptions;
+      const result = await service.createInvitation(
+        DEFAULT_SERVER_AUTH_CONTEXT,
+        forgedRequest,
+      );
 
-      expect(result.invitation!.createdByHandle).toBe('admin-1');
+      expect(result.invitation).toMatchObject({
+        createdBy: DEFAULT_PRINCIPAL.id,
+        createdByHandle: DEFAULT_PRINCIPAL.handle,
+      });
+      expect(mocks.resolveInvitationPrincipal).toHaveBeenCalledWith(
+        DEFAULT_SERVER_AUTH_CONTEXT,
+      );
+      expect(JSON.stringify(mocks.auditLog.mock.calls)).not.toContain('forged');
     });
 
     it('sets expiresInHours to 0 when explicitly passed as 0 (uses config default)', async () => {
       const service = new InvitationService();
-      const result = await service.createInvitation({
+      const result = await service.createInvitation(DEFAULT_SERVER_AUTH_CONTEXT, {
         ...defaultCreateOptions,
         expiresInHours: 0,
       });
@@ -426,10 +479,131 @@ describe('tinyland-invitation', () => {
 
     it('generates unique tokens for multiple invitations', async () => {
       const service = new InvitationService();
-      const r1 = await service.createInvitation(defaultCreateOptions);
-      const r2 = await service.createInvitation(defaultCreateOptions);
+      const r1 = await service.createInvitation(DEFAULT_SERVER_AUTH_CONTEXT, defaultCreateOptions);
+      const r2 = await service.createInvitation(DEFAULT_SERVER_AUTH_CONTEXT, defaultCreateOptions);
 
       expect(r1.invitation!.token).not.toBe(r2.invitation!.token);
+    });
+  });
+
+  describe('principal binding (TIN-2835)', () => {
+    it('denies missing and deleted principals before storage initialization', async () => {
+      for (const resolved of [null, undefined]) {
+        mocks.resolveInvitationPrincipal.mockResolvedValueOnce(resolved);
+        const service = new InvitationService();
+
+        await expect(
+          service.createInvitation(DEFAULT_SERVER_AUTH_CONTEXT, defaultCreateOptions),
+        ).rejects.toMatchObject({ name: 'InvitationError', code: 'forbidden' });
+      }
+
+      expect(mocks.readFile).not.toHaveBeenCalled();
+      expect(mocks.writeFile).not.toHaveBeenCalled();
+    });
+
+    it('denies an inactive principal before role policy and storage writes', async () => {
+      setResolvedPrincipal(mocks, { isActive: false });
+      const canManageRole = vi.fn(() => true);
+      configure({
+        ...buildConfig(mocks),
+        roleAuthority: createInvitationRoleAuthority({
+          version: SUPPORTED_RBAC_AUTHORITY_VERSION,
+          canManageRole,
+        }),
+      });
+
+      await expect(
+        new InvitationService().createInvitation(
+          DEFAULT_SERVER_AUTH_CONTEXT,
+          defaultCreateOptions,
+        ),
+      ).rejects.toBeInstanceOf(InvitationError);
+      expect(canManageRole).not.toHaveBeenCalled();
+      expect(mocks.readFile).not.toHaveBeenCalled();
+      expect(mocks.writeFile).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['missing role', { id: 'admin-1', handle: 'admin', isActive: true }],
+      [
+        'extra field',
+        {
+          id: 'admin-1',
+          role: 'super_admin',
+          handle: 'admin',
+          isActive: true,
+          email: 'admin@example.com',
+        },
+      ],
+      [
+        'non-boolean active state',
+        { id: 'admin-1', role: 'super_admin', handle: 'admin', isActive: 'true' },
+      ],
+      [
+        'empty identity',
+        { id: '', role: 'super_admin', handle: 'admin', isActive: true },
+      ],
+      [
+        'accessor-backed identity',
+        Object.defineProperties({}, {
+          id: { get: () => 'admin-1', enumerable: true },
+          role: { get: () => 'super_admin', enumerable: true },
+          handle: { get: () => 'admin', enumerable: true },
+          isActive: { get: () => true, enumerable: true },
+        }),
+      ],
+    ])('denies malformed exact-shape principal: %s', async (_name, malformed) => {
+      mocks.resolveInvitationPrincipal.mockResolvedValueOnce(
+        malformed as InvitationPrincipal,
+      );
+
+      await expect(
+        new InvitationService().createInvitation(
+          DEFAULT_SERVER_AUTH_CONTEXT,
+          defaultCreateOptions,
+        ),
+      ).rejects.toBeInstanceOf(InvitationError);
+      expect(mocks.readFile).not.toHaveBeenCalled();
+      expect(mocks.writeFile).not.toHaveBeenCalled();
+    });
+
+    it('audits a resolver exception without request or context identity and denies', async () => {
+      mocks.resolveInvitationPrincipal.mockRejectedValueOnce(
+        new TypeError('session store unavailable'),
+      );
+
+      await expect(
+        new InvitationService().createInvitation(
+          DEFAULT_SERVER_AUTH_CONTEXT,
+          defaultCreateOptions,
+        ),
+      ).rejects.toBeInstanceOf(InvitationError);
+      expect(mocks.auditLog).toHaveBeenCalledWith(
+        'INVITATION_PRINCIPAL_RESOLUTION_ERROR',
+        { reason: 'resolver_error', errorType: 'TypeError' },
+      );
+      expect(JSON.stringify(mocks.auditLog.mock.calls)).not.toContain('server-session-1');
+      expect(mocks.readFile).not.toHaveBeenCalled();
+      expect(mocks.writeFile).not.toHaveBeenCalled();
+    });
+
+    it('reloads the current principal role on every mint attempt', async () => {
+      mocks.resolveInvitationPrincipal
+        .mockResolvedValueOnce({ ...DEFAULT_PRINCIPAL, role: 'admin' })
+        .mockResolvedValueOnce({ ...DEFAULT_PRINCIPAL, role: 'viewer' });
+      const service = new InvitationService();
+
+      const allowed = await service.createInvitation(DEFAULT_SERVER_AUTH_CONTEXT, {
+        role: 'editor',
+      });
+      expect(allowed.success).toBe(true);
+      const writesAfterAllow = mocks.writeFile.mock.calls.length;
+
+      await expect(
+        service.createInvitation(DEFAULT_SERVER_AUTH_CONTEXT, { role: 'editor' }),
+      ).rejects.toBeInstanceOf(InvitationError);
+      expect(mocks.resolveInvitationPrincipal).toHaveBeenCalledTimes(2);
+      expect(mocks.writeFile).toHaveBeenCalledTimes(writesAfterAllow);
     });
   });
 
@@ -440,89 +614,75 @@ describe('tinyland-invitation', () => {
   describe('role-authority gate (TIN-1607, TIN-2822)', () => {
     it('authority: creator strictly outranking target is allowed', async () => {
       const service = new InvitationService();
-      const result = await service.createInvitation({
+      const result = await service.createInvitation(DEFAULT_SERVER_AUTH_CONTEXT, {
         role: 'editor',
-        createdBy: 'boss',
-        createdByRole: 'super_admin',
-        createdByHandle: 'boss',
       });
       expect(result.success).toBe(true);
       expect(result.invitation!.role).toBe('editor');
     });
 
     it('authority: equal rank is denied (strict outranking required)', async () => {
+      setResolvedPrincipal(mocks, { id: 'peer', role: 'admin', handle: 'peer' });
       const service = new InvitationService();
       await expect(
-        service.createInvitation({
+        service.createInvitation(DEFAULT_SERVER_AUTH_CONTEXT, {
           role: 'admin',
-          createdBy: 'peer',
-          createdByRole: 'admin',
-          createdByHandle: 'peer',
         }),
       ).rejects.toBeInstanceOf(InvitationError);
       expect(mocks.writeFile).not.toHaveBeenCalled();
     });
 
     it('authority: lower rank creating a higher role is denied', async () => {
+      setResolvedPrincipal(mocks, { id: 'mod', role: 'moderator', handle: 'mod' });
       const service = new InvitationService();
       await expect(
-        service.createInvitation({
+        service.createInvitation(DEFAULT_SERVER_AUTH_CONTEXT, {
           role: 'super_admin',
-          createdBy: 'mod',
-          createdByRole: 'moderator',
-          createdByHandle: 'mod',
         }),
       ).rejects.toThrow(InvitationError);
     });
 
-    it('missing createdByRole is denied (fail closed)', async () => {
-      const service = new InvitationService();
-      await expect(
-        service.createInvitation({
-          role: 'viewer',
-          createdBy: 'nobody',
-          createdByHandle: 'nobody',
+    it('routes an unknown resolved role through the auth-owned adapter and denies', async () => {
+      setResolvedPrincipal(mocks, { id: 'x', role: 'wizard', handle: 'x' });
+      const canManageRole = vi.fn(testCanManageRole);
+      configure({
+        ...buildConfig(mocks),
+        roleAuthority: createInvitationRoleAuthority({
+          version: SUPPORTED_RBAC_AUTHORITY_VERSION,
+          canManageRole,
         }),
-      ).rejects.toBeInstanceOf(InvitationError);
-    });
-
-    it('unknown role vocabulary is denied (fail closed)', async () => {
+      });
       const service = new InvitationService();
       await expect(
-        service.createInvitation({
+        service.createInvitation(DEFAULT_SERVER_AUTH_CONTEXT, {
           role: 'editor',
-          createdBy: 'x',
-          createdByRole: 'wizard',
-          createdByHandle: 'x',
         }),
       ).rejects.toBeInstanceOf(InvitationError);
+      expect(canManageRole).toHaveBeenCalledWith('wizard', 'editor');
+      expect(mocks.writeFile).not.toHaveBeenCalled();
     });
 
     it('authority is never blindly permissive: a viewer cannot mint an admin invite', async () => {
+      setResolvedPrincipal(mocks, { id: 'v', role: 'viewer', handle: 'v' });
       const service = new InvitationService();
       await expect(
-        service.createInvitation({
+        service.createInvitation(DEFAULT_SERVER_AUTH_CONTEXT, {
           role: 'admin',
-          createdBy: 'v',
-          createdByRole: 'viewer',
-          createdByHandle: 'v',
         }),
       ).rejects.toBeInstanceOf(InvitationError);
       expect(mocks.writeFile).not.toHaveBeenCalled();
     });
 
     it('an allowing hook cannot elevate a role pair denied by the authority', async () => {
+      setResolvedPrincipal(mocks, { id: 'v', role: 'viewer', handle: 'v' });
       const config = buildConfig(mocks);
       const canCreateInviteForRole = vi.fn(() => true);
       configure({ ...config, canCreateInviteForRole });
 
       const service = new InvitationService();
       await expect(
-        service.createInvitation({
+        service.createInvitation(DEFAULT_SERVER_AUTH_CONTEXT, {
           role: 'admin',
-          createdBy: 'v',
-          createdByRole: 'viewer',
-          createdByHandle: 'v',
         }),
       ).rejects.toBeInstanceOf(InvitationError);
 
@@ -537,11 +697,8 @@ describe('tinyland-invitation', () => {
 
       const service = new InvitationService();
       await expect(
-        service.createInvitation({
+        service.createInvitation(DEFAULT_SERVER_AUTH_CONTEXT, {
           role: 'editor',
-          createdBy: 'boss',
-          createdByRole: 'super_admin',
-          createdByHandle: 'boss',
         }),
       ).rejects.toBeInstanceOf(InvitationError);
       expect(mocks.writeFile).not.toHaveBeenCalled();
@@ -571,7 +728,7 @@ describe('tinyland-invitation', () => {
 
       const service = new InvitationService();
       await expect(
-        service.createInvitation(defaultCreateOptions),
+        service.createInvitation(DEFAULT_SERVER_AUTH_CONTEXT, defaultCreateOptions),
       ).rejects.toMatchObject({ name: 'InvitationError', code: 'forbidden' });
       expect(mocks.auditLog).toHaveBeenCalledWith(
         'INVITATION_ROLE_AUTHORITY_ERROR',
@@ -593,7 +750,7 @@ describe('tinyland-invitation', () => {
 
       const service = new InvitationService();
       await expect(
-        service.createInvitation(defaultCreateOptions),
+        service.createInvitation(DEFAULT_SERVER_AUTH_CONTEXT, defaultCreateOptions),
       ).rejects.toBeInstanceOf(InvitationError);
       expect(mocks.auditLog).toHaveBeenCalledWith(
         'INVITATION_ROLE_AUTHORITY_ERROR',
@@ -614,7 +771,7 @@ describe('tinyland-invitation', () => {
 
       const service = new InvitationService();
       await expect(
-        service.createInvitation(defaultCreateOptions),
+        service.createInvitation(DEFAULT_SERVER_AUTH_CONTEXT, defaultCreateOptions),
       ).rejects.toBeInstanceOf(InvitationError);
       expect(mocks.writeFile).not.toHaveBeenCalled();
     });
@@ -630,12 +787,15 @@ describe('tinyland-invitation', () => {
 
       const service = new InvitationService();
       await expect(
-        service.createInvitation(defaultCreateOptions),
+        service.createInvitation(DEFAULT_SERVER_AUTH_CONTEXT, defaultCreateOptions),
       ).rejects.toBeInstanceOf(InvitationError);
       expect(mocks.auditLog).toHaveBeenCalledWith(
         'INVITATION_ROLE_AUTHORITY_ERROR',
         expect.objectContaining({
           reason: 'authority_error',
+          createdBy: DEFAULT_PRINCIPAL.id,
+          createdByRole: DEFAULT_PRINCIPAL.role,
+          createdByHandle: DEFAULT_PRINCIPAL.handle,
           errorType: 'RangeError',
         }),
       );
@@ -643,13 +803,11 @@ describe('tinyland-invitation', () => {
     });
 
     it('thrown InvitationError carries the forbidden code', async () => {
+      setResolvedPrincipal(mocks, { id: 'v', role: 'viewer', handle: 'v' });
       const service = new InvitationService();
       await expect(
-        service.createInvitation({
+        service.createInvitation(DEFAULT_SERVER_AUTH_CONTEXT, {
           role: 'admin',
-          createdBy: 'v',
-          createdByRole: 'viewer',
-          createdByHandle: 'v',
         }),
       ).rejects.toMatchObject({ name: 'InvitationError', code: 'forbidden' });
     });
@@ -737,7 +895,7 @@ describe('tinyland-invitation', () => {
       
       const service = new InvitationService();
       
-      const created = await service.createInvitation(defaultCreateOptions);
+      const created = await service.createInvitation(DEFAULT_SERVER_AUTH_CONTEXT, defaultCreateOptions);
       const token = created.invitation!.token;
 
       const result = await service.acceptInvitation({
@@ -756,7 +914,7 @@ describe('tinyland-invitation', () => {
 
     it('creates user with correct fields', async () => {
       const service = new InvitationService();
-      const created = await service.createInvitation(defaultCreateOptions);
+      const created = await service.createInvitation(DEFAULT_SERVER_AUTH_CONTEXT, defaultCreateOptions);
 
       const result = await service.acceptInvitation({
         token: created.invitation!.token,
@@ -778,7 +936,7 @@ describe('tinyland-invitation', () => {
 
     it('calls hashPassword with correct rounds from authConfig', async () => {
       const service = new InvitationService();
-      const created = await service.createInvitation(defaultCreateOptions);
+      const created = await service.createInvitation(DEFAULT_SERVER_AUTH_CONTEXT, defaultCreateOptions);
 
       await service.acceptInvitation({
         token: created.invitation!.token,
@@ -791,7 +949,7 @@ describe('tinyland-invitation', () => {
 
     it('marks invitation as used after acceptance', async () => {
       const service = new InvitationService();
-      const created = await service.createInvitation(defaultCreateOptions);
+      const created = await service.createInvitation(DEFAULT_SERVER_AUTH_CONTEXT, defaultCreateOptions);
       const token = created.invitation!.token;
 
       await service.acceptInvitation({ token, handle: 'user1', password: 'pass' });
@@ -803,7 +961,7 @@ describe('tinyland-invitation', () => {
 
     it('allows exactly one concurrent acceptance for one token', async () => {
       const creator = new InvitationService();
-      const created = await creator.createInvitation(defaultCreateOptions);
+      const created = await creator.createInvitation(DEFAULT_SERVER_AUTH_CONTEXT, defaultCreateOptions);
       const token = created.invitation!.token;
       const services = Array.from({ length: 12 }, () => new InvitationService());
 
@@ -858,7 +1016,7 @@ describe('tinyland-invitation', () => {
 
     it('re-reads used state after a stale service instance enters the token lock', async () => {
       const acceptingService = new InvitationService();
-      const created = await acceptingService.createInvitation(defaultCreateOptions);
+      const created = await acceptingService.createInvitation(DEFAULT_SERVER_AUTH_CONTEXT, defaultCreateOptions);
       const token = created.invitation!.token;
       const staleService = new InvitationService();
 
@@ -887,7 +1045,7 @@ describe('tinyland-invitation', () => {
 
     it('calls auditLog with INVITATION_ACCEPTED and USER_CREATED', async () => {
       const service = new InvitationService();
-      const created = await service.createInvitation(defaultCreateOptions);
+      const created = await service.createInvitation(DEFAULT_SERVER_AUTH_CONTEXT, defaultCreateOptions);
 
       mocks.auditLog.mockClear();
 
@@ -910,7 +1068,7 @@ describe('tinyland-invitation', () => {
 
     it('returns tempTotpSecret from the invitation', async () => {
       const service = new InvitationService();
-      const created = await service.createInvitation(defaultCreateOptions);
+      const created = await service.createInvitation(DEFAULT_SERVER_AUTH_CONTEXT, defaultCreateOptions);
 
       const result = await service.acceptInvitation({
         token: created.invitation!.token,
@@ -963,7 +1121,7 @@ describe('tinyland-invitation', () => {
       };
 
       const service = new InvitationService();
-      const created = await service.createInvitation(defaultCreateOptions);
+      const created = await service.createInvitation(DEFAULT_SERVER_AUTH_CONTEXT, defaultCreateOptions);
 
       files.set('/tmp/admin-users.json', JSON.stringify([existingUser]));
 
@@ -979,7 +1137,7 @@ describe('tinyland-invitation', () => {
 
     it('writes new user to admin users file', async () => {
       const service = new InvitationService();
-      const created = await service.createInvitation(defaultCreateOptions);
+      const created = await service.createInvitation(DEFAULT_SERVER_AUTH_CONTEXT, defaultCreateOptions);
 
       await service.acceptInvitation({
         token: created.invitation!.token,
@@ -995,7 +1153,7 @@ describe('tinyland-invitation', () => {
 
     it('keeps the token consumed when user creation fails after the claim', async () => {
       const service = new InvitationService();
-      const created = await service.createInvitation(defaultCreateOptions);
+      const created = await service.createInvitation(DEFAULT_SERVER_AUTH_CONTEXT, defaultCreateOptions);
       const token = created.invitation!.token;
 
       mocks.hashPassword.mockRejectedValueOnce(new Error('hash failure'));
@@ -1026,7 +1184,7 @@ describe('tinyland-invitation', () => {
 
     it('fails closed in-process when the token claim cannot be persisted', async () => {
       const service = new InvitationService();
-      const created = await service.createInvitation(defaultCreateOptions);
+      const created = await service.createInvitation(DEFAULT_SERVER_AUTH_CONTEXT, defaultCreateOptions);
       const token = created.invitation!.token;
 
       mocks.writeFile.mockRejectedValueOnce(new Error('claim write failed'));
@@ -1230,7 +1388,7 @@ describe('tinyland-invitation', () => {
       
       
       const service = new InvitationService();
-      const created = await service.createInvitation(defaultCreateOptions);
+      const created = await service.createInvitation(DEFAULT_SERVER_AUTH_CONTEXT, defaultCreateOptions);
       const token = created.invitation!.token;
 
       
@@ -1288,9 +1446,9 @@ describe('tinyland-invitation', () => {
       const service = new InvitationService();
 
       
-      await service.createInvitation(defaultCreateOptions);
-      await service.createInvitation(defaultCreateOptions);
-      const third = await service.createInvitation(defaultCreateOptions);
+      await service.createInvitation(DEFAULT_SERVER_AUTH_CONTEXT, defaultCreateOptions);
+      await service.createInvitation(DEFAULT_SERVER_AUTH_CONTEXT, defaultCreateOptions);
+      const third = await service.createInvitation(DEFAULT_SERVER_AUTH_CONTEXT, defaultCreateOptions);
 
       await service.acceptInvitation({
         token: third.invitation!.token,
@@ -1339,8 +1497,8 @@ describe('tinyland-invitation', () => {
     it('counts used invitations correctly', async () => {
       installStatefulStorage(mocks);
       const service = new InvitationService();
-      const c1 = await service.createInvitation(defaultCreateOptions);
-      const c2 = await service.createInvitation(defaultCreateOptions);
+      const c1 = await service.createInvitation(DEFAULT_SERVER_AUTH_CONTEXT, defaultCreateOptions);
+      const c2 = await service.createInvitation(DEFAULT_SERVER_AUTH_CONTEXT, defaultCreateOptions);
 
       
       let handleCounter = 0;
@@ -1398,7 +1556,7 @@ describe('tinyland-invitation', () => {
 
     it('initializes on createInvitation call', async () => {
       const service = new InvitationService();
-      await service.createInvitation(defaultCreateOptions);
+      await service.createInvitation(DEFAULT_SERVER_AUTH_CONTEXT, defaultCreateOptions);
 
       expect(mocks.readFile).toHaveBeenCalledWith('/tmp/invites.json');
     });
@@ -1515,7 +1673,7 @@ describe('tinyland-invitation', () => {
 
     it('writes invitations as serialized JSON', async () => {
       const service = new InvitationService();
-      await service.createInvitation(defaultCreateOptions);
+      await service.createInvitation(DEFAULT_SERVER_AUTH_CONTEXT, defaultCreateOptions);
 
       const writeCall = mocks.writeFile.mock.calls.find((c) => c[0] === '/tmp/invites.json');
       expect(writeCall).toBeDefined();
@@ -1537,7 +1695,7 @@ describe('tinyland-invitation', () => {
     it('reads admin users from the configured path during accept', async () => {
       installStatefulStorage(mocks);
       const service = new InvitationService();
-      const created = await service.createInvitation(defaultCreateOptions);
+      const created = await service.createInvitation(DEFAULT_SERVER_AUTH_CONTEXT, defaultCreateOptions);
 
       await service.acceptInvitation({
         token: created.invitation!.token,
@@ -1551,7 +1709,7 @@ describe('tinyland-invitation', () => {
     it('writes admin users to the configured path during accept', async () => {
       installStatefulStorage(mocks);
       const service = new InvitationService();
-      const created = await service.createInvitation(defaultCreateOptions);
+      const created = await service.createInvitation(DEFAULT_SERVER_AUTH_CONTEXT, defaultCreateOptions);
 
       await service.acceptInvitation({
         token: created.invitation!.token,
@@ -1568,7 +1726,7 @@ describe('tinyland-invitation', () => {
     it('handles missing admin users file gracefully', async () => {
       installStatefulStorage(mocks);
       const service = new InvitationService();
-      const created = await service.createInvitation(defaultCreateOptions);
+      const created = await service.createInvitation(DEFAULT_SERVER_AUTH_CONTEXT, defaultCreateOptions);
 
       const result = await service.acceptInvitation({
         token: created.invitation!.token,
@@ -1633,7 +1791,7 @@ describe('tinyland-invitation', () => {
 
     it('each new InvitationService instance has independent state', async () => {
       const service1 = new InvitationService();
-      await service1.createInvitation(defaultCreateOptions);
+      await service1.createInvitation(DEFAULT_SERVER_AUTH_CONTEXT, defaultCreateOptions);
 
       const service2 = new InvitationService();
       
@@ -1656,7 +1814,7 @@ describe('tinyland-invitation', () => {
       mocks.writeFile.mockRejectedValueOnce(new Error('disk full'));
 
       const service = new InvitationService();
-      const result = await service.createInvitation(defaultCreateOptions);
+      const result = await service.createInvitation(DEFAULT_SERVER_AUTH_CONTEXT, defaultCreateOptions);
 
       expect(result.success).toBe(false);
       expect(result.error).toBe('Failed to create invitation');
@@ -1669,7 +1827,7 @@ describe('tinyland-invitation', () => {
       });
 
       const service = new InvitationService();
-      const created = await service.createInvitation({
+      const created = await service.createInvitation(DEFAULT_SERVER_AUTH_CONTEXT, {
         ...defaultCreateOptions,
         handle: 'roundtrip',
       });
@@ -1681,25 +1839,30 @@ describe('tinyland-invitation', () => {
       expect(parsed[0].temporaryTotpSecret).toBe('JBSWY3DPEHPK3PXP');
     });
 
-    it('creates invitation with createdByHandle falling back to createdBy', async () => {
+    it('persists the resolved principal handle without request fallback', async () => {
+      setResolvedPrincipal(mocks, {
+        id: 'creator-id',
+        role: 'super_admin',
+        handle: 'CreatorHandle',
+      });
       const service = new InvitationService();
-      const result = await service.createInvitation({
+      const result = await service.createInvitation(DEFAULT_SERVER_AUTH_CONTEXT, {
         role: 'admin',
-        createdBy: 'creator-id',
-        createdByRole: 'super_admin',
-        createdByHandle: '',
       });
 
-      expect(result.invitation!.createdByHandle).toBe('creator-id');
+      expect(result.invitation).toMatchObject({
+        createdBy: 'creator-id',
+        createdByHandle: 'CreatorHandle',
+      });
     });
 
     it('handles concurrent creates without data loss', async () => {
       const service = new InvitationService();
 
       const results = await Promise.all([
-        service.createInvitation({ ...defaultCreateOptions, handle: 'user1' }),
-        service.createInvitation({ ...defaultCreateOptions, handle: 'user2' }),
-        service.createInvitation({ ...defaultCreateOptions, handle: 'user3' }),
+        service.createInvitation(DEFAULT_SERVER_AUTH_CONTEXT, { ...defaultCreateOptions, handle: 'user1' }),
+        service.createInvitation(DEFAULT_SERVER_AUTH_CONTEXT, { ...defaultCreateOptions, handle: 'user2' }),
+        service.createInvitation(DEFAULT_SERVER_AUTH_CONTEXT, { ...defaultCreateOptions, handle: 'user3' }),
       ]);
 
       expect(results.every((r) => r.success)).toBe(true);
@@ -1711,7 +1874,7 @@ describe('tinyland-invitation', () => {
     it('handles the case where admin users file returns invalid JSON', async () => {
       const files = installStatefulStorage(mocks);
       const service = new InvitationService();
-      const created = await service.createInvitation(defaultCreateOptions);
+      const created = await service.createInvitation(DEFAULT_SERVER_AUTH_CONTEXT, defaultCreateOptions);
       files.set('/tmp/admin-users.json', 'not json');
 
       
@@ -1738,7 +1901,10 @@ describe('tinyland-invitation', () => {
       
       const { createInvitation } = await import('../src/service.js');
       
-      const result = await createInvitation(defaultCreateOptions);
+      const result = await createInvitation(
+        DEFAULT_SERVER_AUTH_CONTEXT,
+        defaultCreateOptions,
+      );
       expect(result.success).toBe(true);
     });
 
@@ -1777,7 +1943,7 @@ describe('tinyland-invitation', () => {
       resetConfig();
       const service = new InvitationService();
 
-      await expect(service.createInvitation(defaultCreateOptions)).rejects.toThrow(
+      await expect(service.createInvitation(DEFAULT_SERVER_AUTH_CONTEXT, defaultCreateOptions)).rejects.toThrow(
         'tinyland-invitation is not configured',
       );
     });
@@ -1835,14 +2001,16 @@ describe('tinyland-invitation', () => {
   describe('full workflow', () => {
     it('create -> get -> accept -> verify used', async () => {
       installStatefulStorage(mocks);
+      setResolvedPrincipal(mocks, {
+        id: 'super-admin',
+        role: 'super_admin',
+        handle: 'SuperAdmin',
+      });
       const service = new InvitationService();
 
       
-      const created = await service.createInvitation({
+      const created = await service.createInvitation(DEFAULT_SERVER_AUTH_CONTEXT, {
         role: 'moderator',
-        createdBy: 'super-admin',
-        createdByRole: 'super_admin',
-        createdByHandle: 'SuperAdmin',
         handle: 'newmod',
       });
       expect(created.success).toBe(true);
@@ -1870,7 +2038,7 @@ describe('tinyland-invitation', () => {
     it('create -> revoke -> verify gone', async () => {
       const service = new InvitationService();
 
-      const created = await service.createInvitation(defaultCreateOptions);
+      const created = await service.createInvitation(DEFAULT_SERVER_AUTH_CONTEXT, defaultCreateOptions);
       const token = created.invitation!.token;
 
       
@@ -1889,7 +2057,7 @@ describe('tinyland-invitation', () => {
     it('create -> extend -> verify extended', async () => {
       const service = new InvitationService();
 
-      const created = await service.createInvitation(defaultCreateOptions);
+      const created = await service.createInvitation(DEFAULT_SERVER_AUTH_CONTEXT, defaultCreateOptions);
       const token = created.invitation!.token;
       const originalExpiry = new Date(created.invitation!.expiresAt);
 
@@ -1907,9 +2075,9 @@ describe('tinyland-invitation', () => {
     it('create multiple -> list pending -> verify count', async () => {
       const service = new InvitationService();
 
-      await service.createInvitation(defaultCreateOptions);
-      await service.createInvitation(defaultCreateOptions);
-      await service.createInvitation(defaultCreateOptions);
+      await service.createInvitation(DEFAULT_SERVER_AUTH_CONTEXT, defaultCreateOptions);
+      await service.createInvitation(DEFAULT_SERVER_AUTH_CONTEXT, defaultCreateOptions);
+      await service.createInvitation(DEFAULT_SERVER_AUTH_CONTEXT, defaultCreateOptions);
 
       const pending = await service.listPendingInvitations();
       expect(pending).toHaveLength(3);
