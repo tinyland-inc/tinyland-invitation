@@ -15,6 +15,7 @@ export declare class InvitationService {
     extendInvitation(token: string, additionalHours: number): Promise<boolean>;
     getStatistics(): Promise<InvitationStatistics>;
     private canCreateInviteForRole;
+    private auditRoleAuthorityFailure;
     private loadAdminUsers;
 }
 export declare const invitationService: InvitationService;

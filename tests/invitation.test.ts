@@ -5,7 +5,11 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { configure, getConfig, resetConfig } from '../src/config.js';
 import { InvitationService } from '../src/service.js';
-import { InvitationError } from '../src/index.js';
+import {
+  createInvitationRoleAuthority,
+  InvitationError,
+  SUPPORTED_RBAC_AUTHORITY_VERSION,
+} from '../src/index.js';
 import type {
   InvitationConfig,
   AdminInvite,
@@ -35,6 +39,38 @@ function createMocks() {
 
 type Mocks = ReturnType<typeof createMocks>;
 
+const TEST_ROLE_RANKS = Object.freeze({
+  super_admin: 100,
+  admin: 90,
+  moderator: 70,
+  editor: 60,
+  event_manager: 50,
+  contributor: 40,
+  member: 30,
+  viewer: 10,
+} as const);
+
+function testCanManageRole(actorRole: string, targetRole: string): boolean {
+  if (
+    !Object.prototype.hasOwnProperty.call(TEST_ROLE_RANKS, actorRole) ||
+    !Object.prototype.hasOwnProperty.call(TEST_ROLE_RANKS, targetRole)
+  ) {
+    return false;
+  }
+
+  return (
+    TEST_ROLE_RANKS[actorRole as keyof typeof TEST_ROLE_RANKS] >
+    TEST_ROLE_RANKS[targetRole as keyof typeof TEST_ROLE_RANKS]
+  );
+}
+
+function createTestRoleAuthority() {
+  return createInvitationRoleAuthority({
+    version: SUPPORTED_RBAC_AUTHORITY_VERSION,
+    canManageRole: testCanManageRole,
+  });
+}
+
 function buildConfig(mocks: Mocks): InvitationConfig {
   return {
     readFile: mocks.readFile,
@@ -52,6 +88,7 @@ function buildConfig(mocks: Mocks): InvitationConfig {
     },
     auditLog: mocks.auditLog,
     publicUrl: 'http://localhost:9080',
+    roleAuthority: createTestRoleAuthority(),
   };
 }
 
@@ -99,8 +136,8 @@ function makeUsedInvite(overrides: Partial<AdminInvite> = {}): AdminInvite {
 }
 
 
-// createdByRole is super_admin so the default role-hierarchy gate (TIN-1607 R3)
-// permits these fixture invites (super_admin strictly outranks editor).
+// createdByRole is super_admin so the injected test authority permits these
+// fixture invites (super_admin strictly outranks editor).
 const defaultCreateOptions: InvitationCreateOptions = {
   role: 'editor',
   createdBy: 'admin-1',
@@ -165,7 +202,7 @@ describe('tinyland-invitation', () => {
   
 
   describe('createInvitation', () => {
-    it('throws InvitationError when the configured canCreateInviteForRole hook denies', async () => {
+    it('throws InvitationError when the narrowing hook denies an authority allow', async () => {
       const config = buildConfig(mocks);
       const canCreateInviteForRole = vi.fn(() => false);
       configure({ ...config, canCreateInviteForRole });
@@ -174,20 +211,20 @@ describe('tinyland-invitation', () => {
       await expect(
         service.createInvitation({
           ...defaultCreateOptions,
-          createdByRole: 'editor',
-          role: 'admin',
+          createdByRole: 'super_admin',
+          role: 'editor',
         }),
       ).rejects.toThrow('Insufficient permissions to create invitation for this role');
 
       expect(canCreateInviteForRole).toHaveBeenCalledWith({
         createdBy: 'admin-1',
-        createdByRole: 'editor',
-        targetRole: 'admin',
+        createdByRole: 'super_admin',
+        targetRole: 'editor',
       });
       expect(mocks.writeFile).not.toHaveBeenCalled();
     });
 
-    it('creates the invitation when the hook allows, including async hooks', async () => {
+    it('creates the invitation when both authority and async hook allow', async () => {
       const config = buildConfig(mocks);
       const canCreateInviteForRole = vi.fn(async () => true);
       configure({ ...config, canCreateInviteForRole });
@@ -195,20 +232,18 @@ describe('tinyland-invitation', () => {
       const service = new InvitationService();
       const result = await service.createInvitation({
         ...defaultCreateOptions,
-        createdByRole: 'owner',
+        createdByRole: 'super_admin',
       });
 
       expect(result.success).toBe(true);
       expect(canCreateInviteForRole).toHaveBeenCalledWith({
         createdBy: 'admin-1',
-        createdByRole: 'owner',
+        createdByRole: 'super_admin',
         targetRole: 'editor',
       });
     });
 
-    it('applies the real role-hierarchy gate when no hook is configured (fail closed)', async () => {
-      // TIN-1607 R3: the unconfigured default is the real hierarchy check, not
-      // permissive. editor does NOT strictly outrank admin, so this is denied.
+    it('applies the injected authority when no narrowing hook is configured', async () => {
       const service = new InvitationService();
       await expect(
         service.createInvitation({
@@ -221,7 +256,7 @@ describe('tinyland-invitation', () => {
       expect(mocks.writeFile).not.toHaveBeenCalled();
     });
 
-    it('allows creation via the default gate when the creator strictly outranks the target', async () => {
+    it('allows creation when the authority says the creator strictly outranks the target', async () => {
       const service = new InvitationService();
       const result = await service.createInvitation({
         ...defaultCreateOptions,
@@ -402,8 +437,8 @@ describe('tinyland-invitation', () => {
   // Role-authority gate (TIN-1607 R3)
   //
 
-  describe('role-authority gate (TIN-1607)', () => {
-    it('default gate: creator strictly outranking target is allowed', async () => {
+  describe('role-authority gate (TIN-1607, TIN-2822)', () => {
+    it('authority: creator strictly outranking target is allowed', async () => {
       const service = new InvitationService();
       const result = await service.createInvitation({
         role: 'editor',
@@ -415,7 +450,7 @@ describe('tinyland-invitation', () => {
       expect(result.invitation!.role).toBe('editor');
     });
 
-    it('default gate: equal rank is denied (strict outranking required)', async () => {
+    it('authority: equal rank is denied (strict outranking required)', async () => {
       const service = new InvitationService();
       await expect(
         service.createInvitation({
@@ -428,7 +463,7 @@ describe('tinyland-invitation', () => {
       expect(mocks.writeFile).not.toHaveBeenCalled();
     });
 
-    it('default gate: lower rank creating a higher role is denied', async () => {
+    it('authority: lower rank creating a higher role is denied', async () => {
       const service = new InvitationService();
       await expect(
         service.createInvitation({
@@ -440,7 +475,7 @@ describe('tinyland-invitation', () => {
       ).rejects.toThrow(InvitationError);
     });
 
-    it('default gate: missing createdByRole is denied (fail closed)', async () => {
+    it('missing createdByRole is denied (fail closed)', async () => {
       const service = new InvitationService();
       await expect(
         service.createInvitation({
@@ -451,7 +486,7 @@ describe('tinyland-invitation', () => {
       ).rejects.toBeInstanceOf(InvitationError);
     });
 
-    it('default gate: unknown role vocabulary is denied (fail closed)', async () => {
+    it('unknown role vocabulary is denied (fail closed)', async () => {
       const service = new InvitationService();
       await expect(
         service.createInvitation({
@@ -463,7 +498,7 @@ describe('tinyland-invitation', () => {
       ).rejects.toBeInstanceOf(InvitationError);
     });
 
-    it('default gate is never blindly permissive: a viewer cannot mint an admin invite', async () => {
+    it('authority is never blindly permissive: a viewer cannot mint an admin invite', async () => {
       const service = new InvitationService();
       await expect(
         service.createInvitation({
@@ -476,31 +511,27 @@ describe('tinyland-invitation', () => {
       expect(mocks.writeFile).not.toHaveBeenCalled();
     });
 
-    it('config override is respected: an allowing hook bypasses the default denial', async () => {
+    it('an allowing hook cannot elevate a role pair denied by the authority', async () => {
       const config = buildConfig(mocks);
-      // Default gate would DENY (viewer cannot invite admin); the hook allows it.
       const canCreateInviteForRole = vi.fn(() => true);
       configure({ ...config, canCreateInviteForRole });
 
       const service = new InvitationService();
-      const result = await service.createInvitation({
-        role: 'admin',
-        createdBy: 'v',
-        createdByRole: 'viewer',
-        createdByHandle: 'v',
-      });
+      await expect(
+        service.createInvitation({
+          role: 'admin',
+          createdBy: 'v',
+          createdByRole: 'viewer',
+          createdByHandle: 'v',
+        }),
+      ).rejects.toBeInstanceOf(InvitationError);
 
-      expect(result.success).toBe(true);
-      expect(canCreateInviteForRole).toHaveBeenCalledWith({
-        createdBy: 'v',
-        createdByRole: 'viewer',
-        targetRole: 'admin',
-      });
+      expect(canCreateInviteForRole).not.toHaveBeenCalled();
+      expect(mocks.writeFile).not.toHaveBeenCalled();
     });
 
-    it('config override is respected: a denying hook blocks an otherwise-allowed default', async () => {
+    it('a denying hook blocks an otherwise-allowed authority decision', async () => {
       const config = buildConfig(mocks);
-      // Default gate would ALLOW (super_admin outranks editor); the hook denies.
       const canCreateInviteForRole = vi.fn(() => false);
       configure({ ...config, canCreateInviteForRole });
 
@@ -513,6 +544,101 @@ describe('tinyland-invitation', () => {
           createdByHandle: 'boss',
         }),
       ).rejects.toBeInstanceOf(InvitationError);
+      expect(mocks.writeFile).not.toHaveBeenCalled();
+    });
+
+    it('missing authority is rejected during configuration', () => {
+      const canCreateInviteForRole = vi.fn(() => true);
+      expect(() =>
+        configure({
+          ...buildConfig(mocks),
+          roleAuthority: undefined,
+          canCreateInviteForRole,
+        } as unknown as InvitationConfig),
+      ).toThrow('roleAuthority must be created by this package instance');
+
+      expect(canCreateInviteForRole).not.toHaveBeenCalled();
+      expect(mocks.writeFile).not.toHaveBeenCalled();
+    });
+
+    it('a throwing narrowing hook denies with the typed forbidden error', async () => {
+      configure({
+        ...buildConfig(mocks),
+        canCreateInviteForRole: () => {
+          throw new Error('policy unavailable');
+        },
+      });
+
+      const service = new InvitationService();
+      await expect(
+        service.createInvitation(defaultCreateOptions),
+      ).rejects.toMatchObject({ name: 'InvitationError', code: 'forbidden' });
+      expect(mocks.auditLog).toHaveBeenCalledWith(
+        'INVITATION_ROLE_AUTHORITY_ERROR',
+        expect.objectContaining({
+          reason: 'narrowing_hook_error',
+          errorType: 'Error',
+        }),
+      );
+      expect(mocks.writeFile).not.toHaveBeenCalled();
+    });
+
+    it('an asynchronously rejected narrowing hook is audited and denied', async () => {
+      configure({
+        ...buildConfig(mocks),
+        canCreateInviteForRole: async () => {
+          throw new TypeError('policy unavailable');
+        },
+      });
+
+      const service = new InvitationService();
+      await expect(
+        service.createInvitation(defaultCreateOptions),
+      ).rejects.toBeInstanceOf(InvitationError);
+      expect(mocks.auditLog).toHaveBeenCalledWith(
+        'INVITATION_ROLE_AUTHORITY_ERROR',
+        expect.objectContaining({
+          reason: 'narrowing_hook_error',
+          errorType: 'TypeError',
+        }),
+      );
+    });
+
+    it('a truthy non-boolean narrowing result denies', async () => {
+      configure({
+        ...buildConfig(mocks),
+        canCreateInviteForRole: (() => 'yes') as unknown as NonNullable<
+          InvitationConfig['canCreateInviteForRole']
+        >,
+      });
+
+      const service = new InvitationService();
+      await expect(
+        service.createInvitation(defaultCreateOptions),
+      ).rejects.toBeInstanceOf(InvitationError);
+      expect(mocks.writeFile).not.toHaveBeenCalled();
+    });
+
+    it('a throwing authority is audited and denied', async () => {
+      const roleAuthority = createInvitationRoleAuthority({
+        version: SUPPORTED_RBAC_AUTHORITY_VERSION,
+        canManageRole: async () => {
+          throw new RangeError('authority unavailable');
+        },
+      });
+      configure({ ...buildConfig(mocks), roleAuthority });
+
+      const service = new InvitationService();
+      await expect(
+        service.createInvitation(defaultCreateOptions),
+      ).rejects.toBeInstanceOf(InvitationError);
+      expect(mocks.auditLog).toHaveBeenCalledWith(
+        'INVITATION_ROLE_AUTHORITY_ERROR',
+        expect.objectContaining({
+          reason: 'authority_error',
+          errorType: 'RangeError',
+        }),
+      );
       expect(mocks.writeFile).not.toHaveBeenCalled();
     });
 

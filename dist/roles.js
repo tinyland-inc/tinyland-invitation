@@ -1,50 +1,65 @@
-/**
- * Built-in role authority, highest → lowest. Mirrors the canonical
- * `canManageRole()` ordering in `@tummycrypt/tinyland-auth`
- * (src/core/permissions/index.ts) so the standalone default gate matches the
- * policy the app and vendored copies already enforce.
- *
- * `AdminRole` is deliberately widened to `string` (consumer-defined vocabularies),
- * so any role NOT present here is treated as unknown and denied — fail closed.
- */
-export const ROLE_HIERARCHY = [
-    'super_admin',
-    'admin',
-    'editor',
-    'event_manager',
-    'moderator',
-    'contributor',
-    'member',
-    'viewer',
-];
-function normalizeRole(role) {
-    return String(role).toLowerCase().replace(/-/g, '_');
+export const SUPPORTED_RBAC_AUTHORITY_VERSION = 'tinyland-rbac/1';
+const INVITATION_ROLE_AUTHORITY = Symbol('tinyland-invitation-role-authority');
+const INVITATION_ROLE_AUTHORITIES = new WeakSet();
+function ownDataProperty(value, key) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    return descriptor && 'value' in descriptor ? descriptor.value : undefined;
 }
 /**
- * Real role-hierarchy authority gate (TIN-1607 R3).
+ * Build the immutable adapter consumed by the invitation service.
  *
- * A creator may mint an invitation for `targetRole` ONLY when the creator
- * STRICTLY outranks the target. Missing `createdByRole`, or any role outside
- * {@link ROLE_HIERARCHY}, denies the request. This is the DEFAULT policy used
- * whenever a consumer does not inject `config.canCreateInviteForRole`, so the
- * package never mints unrestricted invitations when left unwired.
- *
- * Semantics match `tinyland-auth` `canManageRole()`:
- *   - normalize (lowercase, `-` → `_`)
- *   - unknown actor or target → `false`
- *   - allowed iff `actorIndex < targetIndex` (strictly higher authority)
+ * The rank decision remains owned by the auth package (or another explicitly
+ * reviewed consumer authority). This package validates only the protocol
+ * version and adapter provenance; it intentionally carries no role hierarchy.
  */
-export function defaultCanCreateInviteForRole(args) {
-    const { createdByRole, targetRole } = args;
-    if (!createdByRole) {
+export function createInvitationRoleAuthority(source) {
+    if (typeof source !== 'object' || source === null) {
+        throw new Error('invitation role authority source is required');
+    }
+    const version = ownDataProperty(source, 'version');
+    if (version !== SUPPORTED_RBAC_AUTHORITY_VERSION) {
+        throw new Error(`unsupported RBAC authority version: ${String(version)}`);
+    }
+    const canManageRole = ownDataProperty(source, 'canManageRole');
+    if (typeof canManageRole !== 'function') {
+        throw new Error('invitation role authority must provide canManageRole');
+    }
+    const authority = {
+        version: SUPPORTED_RBAC_AUTHORITY_VERSION,
+        canManageRole,
+    };
+    Object.defineProperty(authority, INVITATION_ROLE_AUTHORITY, {
+        value: true,
+        enumerable: false,
+        configurable: false,
+        writable: false,
+    });
+    Object.freeze(authority);
+    INVITATION_ROLE_AUTHORITIES.add(authority);
+    return authority;
+}
+function isInvitationRoleAuthority(value) {
+    return (typeof value === 'object' &&
+        value !== null &&
+        INVITATION_ROLE_AUTHORITIES.has(value) &&
+        Object.isFrozen(value) &&
+        ownDataProperty(value, 'version') === SUPPORTED_RBAC_AUTHORITY_VERSION &&
+        typeof ownDataProperty(value, 'canManageRole') === 'function');
+}
+/** @internal Validate configuration provenance before the service is exposed. */
+export function assertInvitationRoleAuthority(value) {
+    if (!isInvitationRoleAuthority(value)) {
+        throw new Error('roleAuthority must be created by this package instance with createInvitationRoleAuthority()');
+    }
+}
+/**
+ * @internal Fail closed for absent/invalid adapters. Authority exceptions
+ * propagate so the service can record an operational audit event before deny.
+ */
+export async function authorityAllowsInvitation(authority, decision) {
+    if (!decision.createdByRole || !isInvitationRoleAuthority(authority)) {
         return false;
     }
-    const actor = normalizeRole(createdByRole);
-    const target = normalizeRole(targetRole);
-    const actorIndex = ROLE_HIERARCHY.indexOf(actor);
-    const targetIndex = ROLE_HIERARCHY.indexOf(target);
-    if (actorIndex === -1 || targetIndex === -1) {
-        return false;
-    }
-    return actorIndex < targetIndex;
+    const canManageRole = authority.canManageRole;
+    return ((await canManageRole(decision.createdByRole, decision.targetRole)) === true);
 }
