@@ -7,6 +7,7 @@
 
 import { assertInvitationRoleAuthority } from './roles.js';
 import type { InvitationRoleAuthority, InvitationRoleDecision } from './roles.js';
+import type { AdminRole } from './types.js';
 
 export interface InvitationConfig {
   
@@ -44,6 +45,11 @@ export interface InvitationConfig {
   /** Required versioned rank authority. Missing or invalid authority denies. */
   roleAuthority: InvitationRoleAuthority;
 
+  /** Resolve role from a trusted server-side principal store by creator ID. */
+  resolveCreatorRole: (
+    createdBy: string,
+  ) => AdminRole | null | Promise<AdminRole | null>;
+
   /** Optional consumer veto. It may narrow, but never widen, role authority. */
   canCreateInviteForRole?: (
     args: InvitationRoleDecision,
@@ -58,6 +64,9 @@ let currentConfig: InvitationConfig | null = null;
 
 export function configure(config: InvitationConfig): void {
   assertInvitationRoleAuthority(config.roleAuthority);
+  if (typeof config.resolveCreatorRole !== 'function') {
+    throw new Error('resolveCreatorRole must be a trusted server-side function');
+  }
   currentConfig = config;
 }
 

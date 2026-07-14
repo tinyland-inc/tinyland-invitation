@@ -279,9 +279,13 @@ export class InvitationService {
     // narrower realm rule, but it cannot turn an authority denial into an allow.
     async canCreateInviteForRole(creatorId, targetRole, creatorRole) {
         const config = getConfig();
+        const trustedCreatorRole = await this.resolveCreatorRole(creatorId, creatorRole, targetRole);
+        if (!trustedCreatorRole) {
+            return false;
+        }
         const decision = {
             createdBy: creatorId,
-            createdByRole: creatorRole,
+            createdByRole: trustedCreatorRole,
             targetRole,
         };
         let authorityAllowed = false;
@@ -304,6 +308,44 @@ export class InvitationService {
         catch (error) {
             await this.auditRoleAuthorityFailure('narrowing_hook_error', decision, error);
             return false;
+        }
+    }
+    async resolveCreatorRole(creatorId, assertedRole, targetRole) {
+        const config = getConfig();
+        let resolvedRole;
+        try {
+            resolvedRole = await config.resolveCreatorRole(creatorId);
+        }
+        catch (error) {
+            await this.auditCreatorPrincipalFailure('principal_lookup_error', creatorId, assertedRole, targetRole, undefined, error);
+            return null;
+        }
+        if (typeof resolvedRole !== 'string' || resolvedRole.length === 0) {
+            await this.auditCreatorPrincipalFailure('principal_not_found', creatorId, assertedRole, targetRole);
+            return null;
+        }
+        if (assertedRole !== undefined && assertedRole !== resolvedRole) {
+            await this.auditCreatorPrincipalFailure('principal_role_mismatch', creatorId, assertedRole, targetRole, resolvedRole);
+            return null;
+        }
+        return resolvedRole;
+    }
+    async auditCreatorPrincipalFailure(reason, createdBy, assertedRole, targetRole, resolvedRole, error) {
+        const config = getConfig();
+        try {
+            await config.auditLog('INVITATION_CREATOR_AUTHORITY_DENIED', {
+                reason,
+                createdBy,
+                assertedRole,
+                resolvedRole,
+                targetRole,
+                ...(error === undefined
+                    ? {}
+                    : { errorType: error instanceof Error ? error.name : typeof error }),
+            });
+        }
+        catch (auditError) {
+            console.error('Failed to audit invitation creator authority denial:', auditError);
         }
     }
     async auditRoleAuthorityFailure(reason, decision, error) {

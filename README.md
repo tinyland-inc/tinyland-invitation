@@ -16,6 +16,10 @@ import {
 
 configure({
   // ...storage, crypto, audit, and URL dependencies...
+  resolveCreatorRole: async (createdBy) => {
+    const principal = await trustedAdminStore.findById(createdBy);
+    return principal?.role ?? null;
+  },
   roleAuthority: createInvitationRoleAuthority({
     version: RBAC_AUTHORITY.version,
     canManageRole,
@@ -37,9 +41,12 @@ Applications with local role vocabularies must translate those roles through a
 reviewed auth-package translation contract inside `canManageRole`. Unmapped
 roles must remain denied.
 
-`createdByRole` is asserted by the calling application. Routes must derive it
-from an authenticated server-side principal, never request data. Authority
-callbacks must be bound functions or closures and must not depend on `this`.
+`createdBy` must be the authenticated server-side principal ID, never request
+data. The required `resolveCreatorRole` callback binds that ID to the trusted
+role used for authorization. `createdByRole` is only a compatibility assertion;
+when present, it must exactly equal the resolved role or creation is denied and
+audited. Authority callbacks must be bound functions or closures and must not
+depend on `this`.
 
 ## Breaking migration
 
@@ -51,8 +58,9 @@ unmapped local aliases deny. The planned release sequence is:
    translation contracts.
 2. Review application-local translation maps, including realm collisions such
    as a local `viewer` role.
-3. Publish the breaking invitation release with this required adapter.
-4. Upgrade consumers and run packed-artifact cross-package parity tests before
+3. Wire trusted creator-role resolvers and prove spoofed role assertions deny.
+4. Publish the breaking invitation release with these required adapters.
+5. Upgrade consumers and run packed-artifact cross-package parity tests before
    enabling invitation creation.
 
 Because adapter provenance is package-instance-local, creating an adapter with

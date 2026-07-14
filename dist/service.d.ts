@@ -15,6 +15,8 @@ export declare class InvitationService {
     extendInvitation(token: string, additionalHours: number): Promise<boolean>;
     getStatistics(): Promise<InvitationStatistics>;
     private canCreateInviteForRole;
+    private resolveCreatorRole;
+    private auditCreatorPrincipalFailure;
     private auditRoleAuthorityFailure;
     private loadAdminUsers;
 }

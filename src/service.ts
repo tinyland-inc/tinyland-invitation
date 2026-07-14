@@ -421,9 +421,18 @@ export class InvitationService {
     creatorRole?: AdminRole,
   ): Promise<boolean> {
     const config = getConfig();
+    const trustedCreatorRole = await this.resolveCreatorRole(
+      creatorId,
+      creatorRole,
+      targetRole,
+    );
+    if (!trustedCreatorRole) {
+      return false;
+    }
+
     const decision = {
       createdBy: creatorId,
-      createdByRole: creatorRole,
+      createdByRole: trustedCreatorRole,
       targetRole,
     };
 
@@ -448,6 +457,77 @@ export class InvitationService {
     } catch (error) {
       await this.auditRoleAuthorityFailure('narrowing_hook_error', decision, error);
       return false;
+    }
+  }
+
+  private async resolveCreatorRole(
+    creatorId: string,
+    assertedRole: AdminRole | undefined,
+    targetRole: AdminRole,
+  ): Promise<AdminRole | null> {
+    const config = getConfig();
+    let resolvedRole: AdminRole | null;
+
+    try {
+      resolvedRole = await config.resolveCreatorRole(creatorId);
+    } catch (error) {
+      await this.auditCreatorPrincipalFailure(
+        'principal_lookup_error',
+        creatorId,
+        assertedRole,
+        targetRole,
+        undefined,
+        error,
+      );
+      return null;
+    }
+
+    if (typeof resolvedRole !== 'string' || resolvedRole.length === 0) {
+      await this.auditCreatorPrincipalFailure(
+        'principal_not_found',
+        creatorId,
+        assertedRole,
+        targetRole,
+      );
+      return null;
+    }
+
+    if (assertedRole !== undefined && assertedRole !== resolvedRole) {
+      await this.auditCreatorPrincipalFailure(
+        'principal_role_mismatch',
+        creatorId,
+        assertedRole,
+        targetRole,
+        resolvedRole,
+      );
+      return null;
+    }
+
+    return resolvedRole;
+  }
+
+  private async auditCreatorPrincipalFailure(
+    reason: 'principal_lookup_error' | 'principal_not_found' | 'principal_role_mismatch',
+    createdBy: string,
+    assertedRole: AdminRole | undefined,
+    targetRole: AdminRole,
+    resolvedRole?: AdminRole,
+    error?: unknown,
+  ): Promise<void> {
+    const config = getConfig();
+    try {
+      await config.auditLog('INVITATION_CREATOR_AUTHORITY_DENIED', {
+        reason,
+        createdBy,
+        assertedRole,
+        resolvedRole,
+        targetRole,
+        ...(error === undefined
+          ? {}
+          : { errorType: error instanceof Error ? error.name : typeof error }),
+      });
+    } catch (auditError) {
+      console.error('Failed to audit invitation creator authority denial:', auditError);
     }
   }
 

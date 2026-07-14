@@ -17,6 +17,18 @@ import type {
   InvitationCreateOptions,
 } from '../src/index.js';
 
+const TEST_CREATOR_ROLES: Readonly<Record<string, string | null>> = Object.freeze({
+  'admin-1': 'super_admin',
+  boss: 'super_admin',
+  'creator-id': 'super_admin',
+  'super-admin': 'super_admin',
+  peer: 'admin',
+  'editor-user': 'editor',
+  mod: 'moderator',
+  nobody: null,
+  x: 'wizard',
+  v: 'viewer',
+});
 
 
 
@@ -34,6 +46,11 @@ function createMocks() {
     ),
     generateQrCode: vi.fn(async () => 'data:image/png;base64,qrcode'),
     auditLog: vi.fn<(eventType: string, data: Record<string, unknown>) => Promise<void>>().mockResolvedValue(undefined),
+    resolveCreatorRole: vi.fn(async (createdBy: string) =>
+      Object.prototype.hasOwnProperty.call(TEST_CREATOR_ROLES, createdBy)
+        ? TEST_CREATOR_ROLES[createdBy]
+        : null,
+    ),
   };
 }
 
@@ -89,6 +106,7 @@ function buildConfig(mocks: Mocks): InvitationConfig {
     auditLog: mocks.auditLog,
     publicUrl: 'http://localhost:9080',
     roleAuthority: createTestRoleAuthority(),
+    resolveCreatorRole: mocks.resolveCreatorRole,
   };
 }
 
@@ -195,6 +213,15 @@ describe('tinyland-invitation', () => {
       configure(config2);
       expect(getConfig()).toBe(config2);
     });
+
+    it('rejects a missing creator-role resolver during configuration', () => {
+      expect(() =>
+        configure({
+          ...buildConfig(mocks),
+          resolveCreatorRole: undefined,
+        } as unknown as InvitationConfig),
+      ).toThrow('resolveCreatorRole must be a trusted server-side function');
+    });
   });
 
   
@@ -243,11 +270,106 @@ describe('tinyland-invitation', () => {
       });
     });
 
+    it('uses the trusted resolved role when no compatibility assertion is supplied', async () => {
+      const canCreateInviteForRole = vi.fn(() => true);
+      configure({ ...buildConfig(mocks), canCreateInviteForRole });
+
+      const service = new InvitationService();
+      const result = await service.createInvitation({
+        role: 'editor',
+        createdBy: 'admin-1',
+        createdByHandle: 'admin-handle',
+      });
+
+      expect(result.success).toBe(true);
+      expect(mocks.resolveCreatorRole).toHaveBeenCalledWith('admin-1');
+      expect(canCreateInviteForRole).toHaveBeenCalledWith({
+        createdBy: 'admin-1',
+        createdByRole: 'super_admin',
+        targetRole: 'editor',
+      });
+    });
+
+    it('denies and audits a spoofed higher creator-role assertion', async () => {
+      const canManageRole = vi.fn(() => true);
+      configure({
+        ...buildConfig(mocks),
+        roleAuthority: createInvitationRoleAuthority({
+          version: SUPPORTED_RBAC_AUTHORITY_VERSION,
+          canManageRole,
+        }),
+      });
+
+      const service = new InvitationService();
+      await expect(
+        service.createInvitation({
+          role: 'admin',
+          createdBy: 'v',
+          createdByRole: 'super_admin',
+          createdByHandle: 'viewer',
+        }),
+      ).rejects.toBeInstanceOf(InvitationError);
+
+      expect(mocks.auditLog).toHaveBeenCalledWith(
+        'INVITATION_CREATOR_AUTHORITY_DENIED',
+        expect.objectContaining({
+          reason: 'principal_role_mismatch',
+          createdBy: 'v',
+          assertedRole: 'super_admin',
+          resolvedRole: 'viewer',
+          targetRole: 'admin',
+        }),
+      );
+      expect(canManageRole).not.toHaveBeenCalled();
+      expect(mocks.writeFile).not.toHaveBeenCalled();
+    });
+
+    it('denies and audits a creator-role lookup failure', async () => {
+      mocks.resolveCreatorRole.mockRejectedValueOnce(new TypeError('store unavailable'));
+
+      const service = new InvitationService();
+      await expect(
+        service.createInvitation(defaultCreateOptions),
+      ).rejects.toBeInstanceOf(InvitationError);
+
+      expect(mocks.auditLog).toHaveBeenCalledWith(
+        'INVITATION_CREATOR_AUTHORITY_DENIED',
+        expect.objectContaining({
+          reason: 'principal_lookup_error',
+          createdBy: 'admin-1',
+          errorType: 'TypeError',
+        }),
+      );
+      expect(mocks.writeFile).not.toHaveBeenCalled();
+    });
+
+    it('denies and audits an unknown creator principal', async () => {
+      const service = new InvitationService();
+      await expect(
+        service.createInvitation({
+          role: 'viewer',
+          createdBy: 'missing-user',
+          createdByHandle: 'missing-user',
+        }),
+      ).rejects.toBeInstanceOf(InvitationError);
+
+      expect(mocks.auditLog).toHaveBeenCalledWith(
+        'INVITATION_CREATOR_AUTHORITY_DENIED',
+        expect.objectContaining({
+          reason: 'principal_not_found',
+          createdBy: 'missing-user',
+          targetRole: 'viewer',
+        }),
+      );
+      expect(mocks.writeFile).not.toHaveBeenCalled();
+    });
+
     it('applies the injected authority when no narrowing hook is configured', async () => {
       const service = new InvitationService();
       await expect(
         service.createInvitation({
           ...defaultCreateOptions,
+          createdBy: 'editor-user',
           createdByRole: 'editor',
           role: 'admin',
         }),
@@ -260,6 +382,7 @@ describe('tinyland-invitation', () => {
       const service = new InvitationService();
       const result = await service.createInvitation({
         ...defaultCreateOptions,
+        createdBy: 'peer',
         createdByRole: 'admin',
         role: 'editor',
       });
@@ -475,7 +598,7 @@ describe('tinyland-invitation', () => {
       ).rejects.toThrow(InvitationError);
     });
 
-    it('missing createdByRole is denied (fail closed)', async () => {
+    it('missing trusted principal is denied even without a role assertion', async () => {
       const service = new InvitationService();
       await expect(
         service.createInvitation({
