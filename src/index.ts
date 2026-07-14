@@ -19,7 +19,15 @@ export {
 export { InvitationError } from './errors.js';
 export type { InvitationErrorCode } from './errors.js';
 
-export { defaultCanCreateInviteForRole, ROLE_HIERARCHY } from './roles.js';
+export {
+  createInvitationRoleAuthority,
+  SUPPORTED_RBAC_AUTHORITY_VERSION,
+} from './roles.js';
+export type {
+  InvitationRoleAuthority,
+  InvitationRoleAuthoritySource,
+  InvitationRoleDecision,
+} from './roles.js';
 
 export type {
   AdminRole,

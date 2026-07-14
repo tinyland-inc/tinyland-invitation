@@ -5,6 +5,9 @@
 
 
 
+import { assertInvitationRoleAuthority } from './roles.js';
+import type { InvitationRoleAuthority, InvitationRoleDecision } from './roles.js';
+
 export interface InvitationConfig {
   
   readFile: (path: string) => Promise<string>;
@@ -38,11 +41,13 @@ export interface InvitationConfig {
 
   publicUrl: string;
 
-  canCreateInviteForRole?: (args: {
-    createdBy: string;
-    createdByRole?: string;
-    targetRole: string;
-  }) => boolean | Promise<boolean>;
+  /** Required versioned rank authority. Missing or invalid authority denies. */
+  roleAuthority: InvitationRoleAuthority;
+
+  /** Optional consumer veto. It may narrow, but never widen, role authority. */
+  canCreateInviteForRole?: (
+    args: InvitationRoleDecision,
+  ) => boolean | Promise<boolean>;
 }
 
 let currentConfig: InvitationConfig | null = null;
@@ -52,6 +57,7 @@ let currentConfig: InvitationConfig | null = null;
 
 
 export function configure(config: InvitationConfig): void {
+  assertInvitationRoleAuthority(config.roleAuthority);
   currentConfig = config;
 }
 

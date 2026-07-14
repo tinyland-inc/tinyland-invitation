@@ -1,7 +1,7 @@
 import crypto from 'crypto';
 import { getConfig } from './config.js';
 import { InvitationError } from './errors.js';
-import { defaultCanCreateInviteForRole } from './roles.js';
+import { authorityAllowsInvitation } from './roles.js';
 const acceptanceLocks = new Map();
 const failedAcceptanceClaims = new Set();
 // This serializes a token across every InvitationService instance in one Node
@@ -275,20 +275,51 @@ export class InvitationService {
             used: all.filter((i) => !!i.usedAt).length,
         };
     }
-    // Role authority gate (TIN-1607 R3). A consumer MAY inject a bespoke policy via
-    // config.canCreateInviteForRole (see config.ts); when none is supplied we fall
-    // back to the real role-hierarchy check (defaultCanCreateInviteForRole), which
-    // requires the creator to STRICTLY outrank the target. The default is never
-    // permissive — an unwired consumer fails closed rather than minting
-    // unrestricted invitations.
+    // The versioned authority makes the rank decision. A consumer hook can add a
+    // narrower realm rule, but it cannot turn an authority denial into an allow.
     async canCreateInviteForRole(creatorId, targetRole, creatorRole) {
         const config = getConfig();
-        const gate = config.canCreateInviteForRole ?? defaultCanCreateInviteForRole;
-        return gate({
+        const decision = {
             createdBy: creatorId,
             createdByRole: creatorRole,
             targetRole,
-        });
+        };
+        let authorityAllowed = false;
+        try {
+            authorityAllowed = await authorityAllowsInvitation(config.roleAuthority, decision);
+        }
+        catch (error) {
+            await this.auditRoleAuthorityFailure('authority_error', decision, error);
+            return false;
+        }
+        if (!authorityAllowed) {
+            return false;
+        }
+        if (!config.canCreateInviteForRole) {
+            return true;
+        }
+        try {
+            return (await config.canCreateInviteForRole(decision)) === true;
+        }
+        catch (error) {
+            await this.auditRoleAuthorityFailure('narrowing_hook_error', decision, error);
+            return false;
+        }
+    }
+    async auditRoleAuthorityFailure(reason, decision, error) {
+        const config = getConfig();
+        try {
+            await config.auditLog('INVITATION_ROLE_AUTHORITY_ERROR', {
+                reason,
+                createdBy: decision.createdBy,
+                createdByRole: decision.createdByRole,
+                targetRole: decision.targetRole,
+                errorType: error instanceof Error ? error.name : typeof error,
+            });
+        }
+        catch (auditError) {
+            console.error('Failed to audit invitation role authority error:', auditError);
+        }
     }
     async loadAdminUsers() {
         const config = getConfig();

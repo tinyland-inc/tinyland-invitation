@@ -1,3 +1,4 @@
+import type { InvitationRoleAuthority, InvitationRoleDecision } from './roles.js';
 export interface InvitationConfig {
     readFile: (path: string) => Promise<string>;
     writeFile: (path: string, data: string) => Promise<void>;
@@ -18,11 +19,10 @@ export interface InvitationConfig {
     };
     auditLog: (eventType: string, data: Record<string, unknown>) => Promise<void>;
     publicUrl: string;
-    canCreateInviteForRole?: (args: {
-        createdBy: string;
-        createdByRole?: string;
-        targetRole: string;
-    }) => boolean | Promise<boolean>;
+    /** Required versioned rank authority. Missing or invalid authority denies. */
+    roleAuthority: InvitationRoleAuthority;
+    /** Optional consumer veto. It may narrow, but never widen, role authority. */
+    canCreateInviteForRole?: (args: InvitationRoleDecision) => boolean | Promise<boolean>;
 }
 export declare function configure(config: InvitationConfig): void;
 export declare function getConfig(): InvitationConfig;
